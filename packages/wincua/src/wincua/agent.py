@@ -77,6 +77,18 @@ class Agent:
     def provider_name(self) -> str:
         return getattr(self.provider, "name", type(self.provider).__name__)
 
+    def _escalate(
+        self, reason: str, turn: int, steps: list[dict[str, Any]], history: list[dict[str, Any]]
+    ) -> bool:
+        """Hand planning to the next provider in the fallback chain (ends in null = human)."""
+        escalate = getattr(self.provider, "escalate", None)
+        handed_over = bool(escalate and escalate(reason))
+        steps.append(
+            {"kind": "escalate", "turn": turn, "reason": reason, "to": self.provider_name if handed_over else None}
+        )
+        history.append({"kind": "escalation", "turn": turn, "text": f"Previous planner stopped: {reason}"})
+        return handed_over
+
     def _ensure_backend(self) -> None:
         from wincua_driver.backend import get_backend, set_backend
         from wincua_driver.backend.windows import is_windows
@@ -363,18 +375,6 @@ class Agent:
             recording_path=recording,
             message=f"max_turns ({self.max_turns}) exceeded",
         )
-
-    def _escalate(
-        self, reason: str, turn: int, steps: list[dict[str, Any]], history: list[dict[str, Any]]
-    ) -> bool:
-        """Hand planning to the next provider in the fallback chain (ends in null = human)."""
-        escalate = getattr(self.provider, "escalate", None)
-        handed_over = bool(escalate and escalate(reason))
-        steps.append(
-            {"kind": "escalate", "turn": turn, "reason": reason, "to": self.provider_name if handed_over else None}
-        )
-        history.append({"kind": "escalation", "turn": turn, "text": f"Previous planner stopped: {reason}"})
-        return handed_over
 
     async def _ask_human(self, *, question: str, risk: str = "info") -> str | None:
         if self.hitl is None:
