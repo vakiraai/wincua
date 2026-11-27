@@ -270,6 +270,44 @@ def test_anthropic_missing_key(monkeypatch):
     assert not res.available and "ANTHROPIC_API_KEY" in res.error
 
 
+# HITL-style entries (no turn / call_id; not tool calls) must not become bogus tool calls.
+HITL_HISTORY = [
+    {"kind": "human_instruction", "text": "use the keypad"},
+    {"kind": "tool", "name": "key", "args": {"keys": "alt+f4"}, "call_id": "k1", "turn": 0},
+    {"kind": "rejected", "name": "key", "args": {"keys": "alt+f4"}},
+    {"kind": "tool_failed", "name": "invoke", "message": "boom"},
+]
+
+
+def test_hitl_history_entries_render_as_notes(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ak")
+    tools = {"key", "invoke", "type", "launch", "done"}
+
+    t = FakeTransport().add(200, openai_tool_reply(("done", {"message": "ok"})))
+    run(OpenAICompatProvider(transport=t).plan(task="t", observation=calc_obs(), history=HITL_HISTORY))
+    msgs = t.requests[0].body["messages"]
+    calls = [c["function"]["name"] for m in msgs for c in m.get("tool_calls") or []]
+    assert calls == ["key"]
+    tool_msg = next(m for m in msgs if m["role"] == "tool")["content"]
+    assert tool_msg.startswith("not executed") and "rejected key" in tool_msg and "invoke failed: boom" in tool_msg
+    assert "Human instruction: use the keypad" in str(msgs)
+
+    t = FakeTransport().add(200, anthropic_tool_reply(("done", {"message": "ok"})))
+    run(AnthropicProvider(transport=t).plan(task="t", observation=calc_obs(), history=HITL_HISTORY))
+    amsgs = t.requests[0].body["messages"]
+    roles = [m["role"] for m in amsgs]
+    assert all(a != b for a, b in zip(roles, roles[1:])) and roles[0] == "user"
+    names = {b["name"] for m in amsgs for b in m["content"] if b.get("type") == "tool_use"}
+    assert names <= tools
+
+    t = FakeTransport().add(200, ollama_tool_reply(("done", {"message": "ok"})))
+    only_note = [{"kind": "human_instruction", "text": "press 7 first"}]
+    run(OllamaProvider(transport=t).plan(task="t", observation=calc_obs(), history=only_note))
+    omsgs = t.requests[0].body["messages"]
+    assert [m["role"] for m in omsgs] == ["system", "user", "user"]
+    assert "Human instruction: press 7 first" in omsgs[-1]["content"]
+
+
 # -- fallback / registry / parsing ---------------------------------------------------
 
 

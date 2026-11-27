@@ -12,6 +12,7 @@ from wincua_providers.prompting import (
     NUDGE,
     clean_args,
     group_history,
+    orphan_notes,
     screenshot_b64,
     user_turn_text,
 )
@@ -60,6 +61,8 @@ class OllamaProvider(HTTPChatProvider):
         if turns:
             messages.append({"role": "user", "content": f"Task: {task}"})
         for turn in turns:
+            if turn.text is None and not turn.calls:
+                continue
             if turn.text is not None and not turn.calls:
                 messages.append({"role": "assistant", "content": turn.text})
                 messages.append({"role": "user", "content": NUDGE})
@@ -88,7 +91,7 @@ class OllamaProvider(HTTPChatProvider):
                     messages.append({"role": "user", "content": f"Result of {c.name}: {c.result}"})
         final: dict[str, Any] = {
             "role": "user",
-            "content": user_turn_text(task, observation, first=not turns),
+            "content": user_turn_text(task, observation, first=not turns, notes=orphan_notes(turns)),
         }
         img = screenshot_b64(observation) if self.send_screenshot else None
         if img:

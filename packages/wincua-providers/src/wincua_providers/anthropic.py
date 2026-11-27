@@ -21,6 +21,7 @@ from wincua_providers.prompting import (
     NUDGE,
     clean_args,
     group_history,
+    orphan_notes,
     png_size,
     screenshot_png,
     user_turn_text,
@@ -140,6 +141,8 @@ class AnthropicProvider(HTTPChatProvider):
         if turns:
             messages.append({"role": "user", "content": [{"type": "text", "text": f"Task: {task}"}]})
         for turn in turns:
+            if turn.text is None and not turn.calls:
+                continue
             if turn.text is not None and not turn.calls:
                 messages.append(
                     {"role": "assistant", "content": [{"type": "text", "text": turn.text or "(no tool call)"}]}
@@ -161,7 +164,7 @@ class AnthropicProvider(HTTPChatProvider):
             messages.append({"role": "user", "content": results})
 
         obs_blocks: list[dict[str, Any]] = [
-            {"type": "text", "text": user_turn_text(task, observation, first=not turns)}
+            {"type": "text", "text": user_turn_text(task, observation, first=not turns, notes=orphan_notes(turns))}
         ]
         img = self._prepare_screenshot(observation)
         if img:
