@@ -3,7 +3,7 @@ name = "wincua-providers"
 version = "0.1.0"
 description = "wincua provider bus — Ollama, OpenAI-compat, Null (HITL), cloud stubs"
 readme = "README.md"
-requires-python = ">=3.11,<3.15"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "wincua contributors" }]
 dependencies = []

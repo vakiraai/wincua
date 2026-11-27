@@ -13,14 +13,11 @@ def require_windows_uia_stack() -> int:
     )
 
     print(f"  python: {sys.version.split()[0]}  executable: {sys.executable}")
+    print(f"  host_python_support: {_SUPPORTED_WINDOWS_PYTHON}")
     if sys.version_info >= (3, 15):
         print(
-            f"WARNING: CPython {sys.version_info.major}.{sys.version_info.minor} "
-            f"is outside the supported Windows host range "
-            f"({_SUPPORTED_WINDOWS_PYTHON}). "
-            "`import pywinauto` often fails via pywin32/comtypes even when "
-            "pip show pywinauto succeeds. Prefer a 3.11–3.13 venv.",
-            file=sys.stderr,
+            "  note: Python 3.15 needs comtypes>=1.5.0 and pywin32>=312 "
+            "(cp315 win_amd64 wheels). Reinstall windows extras if import fails."
         )
 
     ok, detail = probe_pywinauto()

@@ -16,6 +16,7 @@ def test_format_includes_executable_version_and_repr():
     assert repr(exc) in msg or "ModuleNotFoundError" in msg
     assert "Exception chain:" in msg
     assert "Traceback:" in msg
+    assert "Dependency probes:" in msg
 
 
 def test_format_missing_pywinauto_suggests_pip_install():
@@ -24,10 +25,13 @@ def test_format_missing_pywinauto_suggests_pip_install():
     msg = format_pywinauto_import_error(exc)
     assert "python -m pip" in msg or "-m pip install" in msg
     assert "packages/wincua-driver[windows]" in msg
+    assert "comtypes>=1.5.0" in msg
+    assert "pywin32>=312" in msg
 
 
-def test_format_dep_failure_mentions_supported_python():
+def test_format_dep_failure_mentions_315_pins():
     exc = ImportError("DLL load failed while importing win32api")
     msg = format_pywinauto_import_error(exc)
-    assert "3.11" in msg and "3.13" in msg
+    assert "comtypes>=1.5.0" in msg
+    assert "pywin32>=312" in msg
     assert "dependency" in msg.lower() or "pywin32" in msg.lower()

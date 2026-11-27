@@ -15,16 +15,17 @@ or a human in a small local HITL UI.
 Phase 0/1 — **real Windows driver path** + scripted Calculator / browser demos.
 Full VLM planning stays thin; demos succeed with `ScriptedProvider` (no LLM).
 
-## Supported Python (important)
+## Supported Python
 
-| Use | Python |
+Packages declare `requires-python = ">=3.11"` (includes **3.15**).
+
+| Use | Notes |
 | --- | --- |
-| **Windows host demos / UIA** | **CPython 3.11–3.13** (recommended) |
-| 3.14 | Experimental — may work with recent `pywin32` / `comtypes` |
-| **3.15** | **Not supported yet** — `pip show pywinauto` can succeed while `import pywinauto` fails inside pywin32/comtypes |
-| CI / import-only / `--mock` | Same `requires-python`: `>=3.11,<3.15` |
+| Windows host UIA (3.11–3.14) | `pywinauto` + `comtypes` + `pywin32` via `[windows]` extra |
+| **Windows host UIA on 3.15** | Requires **`comtypes>=1.5.0`** and **`pywin32>=312`** (PyPI has `cp315-win_amd64` wheels). Older comtypes/pywin32 can make `import pywinauto` fail even when `pip show pywinauto` succeeds |
+| CI / `--mock` | No Windows deps needed |
 
-Packages declare `requires-python = ">=3.11,<3.15"`.
+PyPI check (Nov 2026): `pywin32==312` ships `pywin32-312-cp315-cp315-win_amd64.whl`; `comtypes==1.5.0` is pure-Python with explicit 3.15 support; `pywinauto==0.6.9` is `py2.py3-none-any`; `Pillow>=10` has cp315 Windows wheels.
 
 ## Packages
 
@@ -57,11 +58,11 @@ python -m pytest
 
 Or with uv from the monorepo root: `uv sync`
 
-### Windows 11 host (real UIA) — use Python 3.11–3.13
+### Windows 11 host (real UIA) — including Python 3.15
 
 ```powershell
-# Create / activate a 3.11–3.13 venv if your default is 3.15+
-py -3.12 -m venv .venv
+# Use whatever 3.11+ you prefer (3.15.x is fine with the pins below)
+py -3.15 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
 python -m pip install -U pip
@@ -69,9 +70,14 @@ python -m pip install -e "packages/wincua-driver[windows]"
 python -m pip install -e packages/wincua-providers packages/wincua-hitl
 python -m pip install -e "packages/wincua[windows]"
 
+# If upgrading an older env that already had pywinauto:
+python -m pip install -U "comtypes>=1.5.0" "pywin32>=312" "pywinauto>=0.6.9"
+# Optional if comtypes gen cache is corrupt:
+python -m comtypes.clear_cache
+
 # Verify THIS interpreter can import (not just that the wheel is installed)
 python -m pip show pywinauto pywin32 comtypes
-python -c "import sys, pywinauto; print(sys.executable, sys.version); print(pywinauto.__version__)"
+python -c "import sys, pywinauto, comtypes; print(sys.executable); print(sys.version); print('pywinauto', pywinauto.__version__); print('comtypes', comtypes.__version__)"
 ```
 
 ## Run demos (Win11 interactive desktop)
@@ -95,7 +101,7 @@ $env:WINCUA_LAUNCH_TIMEOUT_S = "60"
 
 | Symptom | Likely cause | What to do |
 | --- | --- | --- |
-| `import pywinauto` fails but `pip show` works | Dep import (pywin32/comtypes), often **Python 3.15** | Use **3.11–3.13**; demos now print full exception chain + `sys.version` |
+| `import pywinauto` fails but `pip show` works | Stale comtypes (&lt;1.5.0) or pywin32 (&lt;312) on 3.15 | `python -m pip install -U "comtypes>=1.5.0" "pywin32>=312"`; demos print full exception chain + dep probes |
 | Timeout, app never appears | Old `Application.start("calc.exe")` stub wait | Driver uses `calculator:` / AppsFolder launch |
 | Calculator title found, no buttons | UWP: controls under ApplicationFrameHost tree | Deep UIA descendant search + `clearEntryButton` / Escape fallback |
 | Browser steps ok but form empty | Edge reused a multi-tab window / infobar stole focus | `--new-window` + throwaway `--user-data-dir`; UIA ValuePattern fill with verify |

@@ -3,21 +3,22 @@ name = "wincua-driver"
 version = "0.1.0"
 description = "wincua observe/act substrate (UIA + screenshot + action router)"
 readme = "README.md"
-# Windows UIA host path: pywinauto/pywin32/comtypes are reliable on 3.11–3.13.
-# Cap below 3.15 — import often fails on 3.15 even when pywinauto itself is installed.
-requires-python = ">=3.11,<3.15"
+# Host UIA works on CPython 3.11+ including 3.15 when windows extras pin
+# comtypes>=1.5.0 and pywin32>=312 (cp315 win_amd64 wheels on PyPI).
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "wincua contributors" }]
 dependencies = []
 
 [project.optional-dependencies]
 # Host Windows UIA via pywinauto (BSD). Not installed on CI/Linux by default.
-# Pin comtypes/pywin32 so nested dep resolution does not pull ancient wheels.
+# Python 3.15 needs comtypes>=1.5.0 (IntFlag/ctypes layout) and pywin32>=312
+# (publishes cp315-win_amd64). pywinauto 0.6.9 is pure-Python (py2.py3).
 windows = [
-    "pywinauto>=0.6.8",
+    "pywinauto>=0.6.9",
     "Pillow>=10.0",
-    "comtypes>=1.4.8",
-    "pywin32>=306; platform_system == 'Windows'",
+    "comtypes>=1.5.0",
+    "pywin32>=312; sys_platform == 'win32'",
 ]
 # Optional Cua wrap — not required; greenfield UIA path is preferred for MVP.
 cua = []

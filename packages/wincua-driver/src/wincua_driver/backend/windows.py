@@ -83,9 +83,12 @@ def windows_unavailable_error(what: str = "WindowsBackend") -> StructuredError:
     )
 
 
-# Host UIA stack (pywinauto + pywin32/comtypes) is reliable on CPython 3.11–3.13.
-# 3.14 may work with recent wheels; 3.15 often breaks `import pywinauto` via deps.
-_SUPPORTED_WINDOWS_PYTHON = "CPython 3.11–3.13 (3.14 experimental; 3.15 not supported yet)"
+# Host UIA stack: CPython 3.11+ including 3.15 with pinned deps
+# (comtypes>=1.5.0, pywin32>=312 which publishes cp315 win_amd64 wheels).
+_SUPPORTED_WINDOWS_PYTHON = "CPython 3.11+ (including 3.15 with comtypes>=1.5.0 and pywin32>=312)"
+_WINDOWS_PIP_PACKAGES = (
+    '"pywinauto>=0.6.9" "Pillow>=10.0" "comtypes>=1.5.0" "pywin32>=312"'
+)
 
 
 def _exception_chain(exc: BaseException) -> list[BaseException]:
@@ -122,6 +125,18 @@ def format_pywinauto_import_error(cause: BaseException) -> str:
             else "find_spec('pywinauto') = None (package not on sys.path)"
         )
 
+    # Probe installed dep versions when available (helps diagnose stale pins).
+    dep_lines: list[str] = []
+    for mod_name, attr in (("comtypes", "__version__"), ("win32api", None), ("pywin32", None)):
+        try:
+            mod = __import__(mod_name)
+            if attr:
+                dep_lines.append(f"  {mod_name}={getattr(mod, attr, '?')!r}")
+            else:
+                dep_lines.append(f"  {mod_name}=importable ({getattr(mod, '__file__', '?')})")
+        except Exception as dep_exc:
+            dep_lines.append(f"  {mod_name}=IMPORT FAIL: {type(dep_exc).__name__}: {dep_exc!r}")
+
     chain = _exception_chain(cause)
     chain_lines = "\n".join(f"  - {type(e).__name__}: {e!r}" for e in chain)
     tb = "".join(traceback.format_exception(type(cause), cause, cause.__traceback__))
@@ -139,8 +154,7 @@ def format_pywinauto_import_error(cause: BaseException) -> str:
         )
         remedy = (
             "Install into THIS same interpreter (prefer python -m pip, never bare pip):\n"
-            f"  {quoted} -m pip install \"pywinauto>=0.6.8\" \"Pillow>=10.0\" "
-            "\"comtypes>=1.4.8\" pywin32\n"
+            f"  {quoted} -m pip install {_WINDOWS_PIP_PACKAGES}\n"
             f"  {quoted} -m pip install -e \"packages/wincua-driver[windows]\"\n"
             f"  {quoted} -m pip install -e \"packages/wincua[windows]\"\n"
             "Verify:\n"
@@ -153,30 +167,34 @@ def format_pywinauto_import_error(cause: BaseException) -> str:
             "dependency import error (pywin32 / comtypes), not a missing pip install."
         )
         remedy = (
-            "Inspect the exception chain below. On Python 3.15, comtypes <1.5.0 and "
-            "older pywin32 builds are known to break; the supported host path is "
-            f"{_SUPPORTED_WINDOWS_PYTHON}.\n"
-            "Options:\n"
-            f"  1) Prefer a 3.11–3.13 venv and reinstall extras with that interpreter.\n"
-            f"  2) Try upgrading deps in-place (may still fail on 3.15):\n"
-            f"       {quoted} -m pip install -U \"comtypes>=1.5.0\" \"pywin32>=308\"\n"
-            f"  3) Re-run the import to see the raw traceback:\n"
-            f"       {quoted} -c \"import pywinauto\""
+            "Inspect the exception chain and dependency probes below.\n"
+            f"Supported host path: {_SUPPORTED_WINDOWS_PYTHON}.\n"
+            "On Python 3.15 specifically:\n"
+            "  - need comtypes>=1.5.0 (fixes 3.15 IntFlag / ctypes layout; <1.5.0 breaks)\n"
+            "  - need pywin32>=312 (publishes cp315-win_amd64 wheels on PyPI)\n"
+            "  - if comtypes cache is corrupt: "
+            f"{quoted} -m comtypes.clear_cache\n"
+            "Upgrade into THIS interpreter, then re-import:\n"
+            f"  {quoted} -m pip install -U \"comtypes>=1.5.0\" \"pywin32>=312\" \"pywinauto>=0.6.9\"\n"
+            f"  {quoted} -m pip install -e \"packages/wincua-driver[windows]\"\n"
+            f"  {quoted} -c \"import pywinauto; print(pywinauto.__version__)\""
         )
 
-    version_warn = ""
+    version_note = ""
     if sys.version_info >= (3, 15):
-        version_warn = (
-            f"\nWARNING: CPython {major_minor} is outside the supported Windows host "
-            f"range ({_SUPPORTED_WINDOWS_PYTHON}).\n"
+        version_note = (
+            f"\nNote: CPython {major_minor} is supported when windows extras are "
+            "pinned to comtypes>=1.5.0 and pywin32>=312.\n"
         )
 
+    deps_block = "\n".join(dep_lines) if dep_lines else "  (none)"
     return (
         f"{headline}\n"
-        f"{version_warn}"
+        f"{version_note}"
         f"  sys.executable = {exe}\n"
         f"  sys.version    = {py_ver}\n"
         f"  {spec_note}\n"
+        f"Dependency probes:\n{deps_block}\n"
         f"Exception chain:\n{chain_lines}\n"
         f"Traceback:\n{tb}"
         f"{remedy}"

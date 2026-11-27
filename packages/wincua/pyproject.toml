@@ -3,7 +3,7 @@ name = "wincua"
 version = "0.1.0"
 description = "Windows-host computer-use agent — Agent loop + public façade"
 readme = "README.md"
-requires-python = ">=3.11,<3.15"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "wincua contributors" }]
 dependencies = [
@@ -15,12 +15,13 @@ dependencies = [
 [project.optional-dependencies]
 # Declare deps directly as well as via driver extras — some installers resolve
 # nested extras inconsistently across interpreters.
+# 3.15: comtypes>=1.5.0 + pywin32>=312 (cp315 wheels).
 windows = [
     "wincua-driver[windows]",
-    "pywinauto>=0.6.8",
+    "pywinauto>=0.6.9",
     "Pillow>=10.0",
-    "comtypes>=1.4.8",
-    "pywin32>=306; platform_system == 'Windows'",
+    "comtypes>=1.5.0",
+    "pywin32>=312; sys_platform == 'win32'",
 ]
 local = ["wincua-providers", "wincua[windows]"]
 cloud = ["wincua-providers"]
