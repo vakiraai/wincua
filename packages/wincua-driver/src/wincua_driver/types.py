@@ -69,7 +69,7 @@ class Semantic:
 
 Action = Click | Type | Invoke | Key | Semantic
 
-ModeUsed = Literal["background", "foreground", "dry-run", "mock", "null"]
+ModeUsed = Literal["background", "foreground", "dry-run", "mock", "null", "windows"]
 
 
 @dataclass

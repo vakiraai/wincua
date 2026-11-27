@@ -9,7 +9,9 @@ authors = [{ name = "wincua contributors" }]
 dependencies = []
 
 [project.optional-dependencies]
-# Optional Cua wrap — not required to import stubs
+# Host Windows UIA via pywinauto (MIT). Not installed on CI/Linux by default.
+windows = ["pywinauto>=0.6.8", "Pillow>=10.0"]
+# Optional Cua wrap — not required; greenfield UIA path is preferred for MVP.
 cua = []
 dev = ["pytest>=8.0"]
 

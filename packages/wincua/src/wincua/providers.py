@@ -4,6 +4,7 @@ from wincua_providers import (
     NullProvider,
     OllamaProvider,
     OpenAICompatProvider,
+    ScriptedProvider,
 )
 
-__all__ = ["NullProvider", "OllamaProvider", "OpenAICompatProvider"]
+__all__ = ["NullProvider", "OllamaProvider", "OpenAICompatProvider", "ScriptedProvider"]

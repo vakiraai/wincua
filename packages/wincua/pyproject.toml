@@ -13,7 +13,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-local = ["wincua-providers"]
+windows = ["wincua-driver[windows]"]
+local = ["wincua-providers", "wincua[windows]"]
 cloud = ["wincua-providers"]
 mcp = ["wincua-mcp"]
 excel = ["wincua-excel"]
