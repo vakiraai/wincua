@@ -1,0 +1,73 @@
+# wincua configuration — copy to one of:
+#   .\wincua.toml                      (current directory)
+#   %APPDATA%\wincua\config.toml       (per user)
+#   any path, then pass --config PATH or set WINCUA_CONFIG=PATH
+#
+# Lookup order: --config / load_config(path) > WINCUA_CONFIG > ./wincua.toml > %APPDATA%\wincua\config.toml
+# No file found → provider "null" (a human answers through HITL).
+#
+# API keys are NEVER stored here. Each provider names the environment variable
+# that holds its key (api_key_env); wincua refuses files with an api_key entry.
+#
+# Check what wincua will use:  python -m wincua.config --probe
+# Docs: docs/config.md
+
+[provider]
+default = "ollama"          # ollama | llamacpp | anthropic | openai | openai_compat | null | scripted
+fallback = ["null"]         # tried in order if default is unreachable; "null" = ask the human (always last)
+
+[providers.ollama]
+base_url = "http://127.0.0.1:11434"
+model = "qwen2.5vl:7b"      # ollama pull qwen2.5vl:7b
+# tool_mode = "auto"        # auto | native | json  (auto falls back to JSON replies if the model has no tool support)
+# send_screenshot = true
+# num_ctx = 16384
+# timeout_s = 120
+
+[providers.llamacpp]
+base_url = "http://127.0.0.1:8080"   # llama-server, OpenAI-compatible /v1 (start with --jinja and --mmproj)
+model = "local"
+
+[providers.anthropic]
+model = "claude-sonnet-4-5"
+api_key_env = "ANTHROPIC_API_KEY"
+# computer_use = false      # also offer Anthropic's computer tool (screenshot x/y clicks)
+# max_tokens = 1024
+
+[providers.openai]
+model = "gpt-4.1"
+api_key_env = "OPENAI_API_KEY"
+
+[providers.openai_compat]
+base_url = ""               # e.g. http://127.0.0.1:1234/v1 (LM Studio), http://127.0.0.1:8000/v1 (vLLM)
+model = ""
+api_key_env = ""            # leave empty for local servers without auth
+
+# Extra named providers pick an implementation with `type`, e.g.:
+# [providers.lmstudio]
+# type = "openai_compat"
+# base_url = "http://127.0.0.1:1234/v1"
+# model = "qwen2.5-vl-7b-instruct"
+
+[driver]
+backend = "windows"          # windows | mock | null
+# Process allow-list, added to each demo's own list. Win11 Calculator runs as
+# CalculatorApp.exe hosted in ApplicationFrameHost.exe; calc.exe is the launcher stub.
+allow = ["CalculatorApp.exe", "ApplicationFrameHost.exe", "calc.exe"]
+launch_timeout_s = 45
+
+# Sections below are read by wincua-hitl and wincua-mcp.
+[hitl]
+mode = "ui"                  # ui | cli | off
+host = "127.0.0.1"
+port = 8765
+confirm_risky_actions = true
+
+[mcp]
+transport = "stdio"          # stdio | http
+http_host = "127.0.0.1"
+http_port = 8766
+confirm_timeout_s = 120      # seconds to wait for a human confirm before failing closed
+max_elements = 150           # cap on UIA elements returned by observe
+allow = []                   # extra allow-list for MCP sessions
+require_confirmation = true  # route risky act calls through HITL

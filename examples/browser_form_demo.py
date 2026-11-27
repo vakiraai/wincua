@@ -16,6 +16,10 @@ Flow:
 Chromium accessibility for ``file://`` pages is less stable than Calculator UIA.
 Keyboard Tab/type remains a fallback inside the driver when ValuePattern fails.
 Headless / remote / non-interactive sessions will fail.
+
+By default the steps are scripted (no LLM). ``--provider NAME`` / ``--config
+PATH`` plan with a real model from ``wincua.toml`` instead; the demo then
+checks the success string itself.
 """
 
 from __future__ import annotations
@@ -119,7 +123,23 @@ async def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Override launch wait seconds (also: env WINCUA_LAUNCH_TIMEOUT_S)",
     )
+    parser.add_argument("--max-turns", type=int, default=25, help="Model-planned runs only")
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _llm_common import (  # noqa: E402
+        add_provider_args,
+        load_demo_config,
+        print_run,
+        verify_visible,
+        wants_model,
+    )
+
+    add_provider_args(parser)
     args = parser.parse_args(argv)
+    cfg = None
+    if wants_model(args):
+        cfg = load_demo_config(args)
+        if cfg is None:
+            return 1
 
     from wincua import Agent
     from wincua_driver import is_windows
@@ -169,6 +189,36 @@ async def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+
+    if cfg is not None:
+        agent = Agent(
+            task=(
+                f"Open {fixture_uri} with open_url (browser={args.browser!r}, "
+                "target='wincua form demo'). Fill the 'Full name' field with "
+                f"{NAME_VALUE!r} and the 'Email' field with {EMAIL_VALUE!r} using type with "
+                "name=<field label>, then invoke the 'Submit form' button. Call done when the "
+                f"page shows {EXPECTED_CONTAINS!r}."
+            ),
+            provider=args.provider,
+            config=cfg,
+            hitl=None,
+            allow=["msedge.exe", "chrome.exe"],
+            mode="foreground",
+            recorder=True,
+            backend=backend,
+            observe_target="wincua form demo",
+            max_turns=args.max_turns,
+        )
+        print("browser_form_demo (model-planned)")
+        print(f"  backend: {backend}")
+        print(f"  provider: {getattr(agent.provider, 'describe', lambda: agent.provider_name)()}")
+        result = await agent.run()
+        print_run(agent, result)
+        if not result.ok:
+            return 2
+        ok, seen = await verify_visible("wincua form demo", contains=EXPECTED_CONTAINS)
+        print(f"verify: expected {EXPECTED_CONTAINS!r} -> {'PASS' if ok else 'FAIL'} ({seen!r})")
+        return 0 if ok else 3
 
     steps = build_browser_steps(fixture_uri)
     if not args.mock:

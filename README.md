@@ -12,8 +12,10 @@ or a human in a small local HITL UI.
 
 ## Status
 
-Phase 0/1 — **real Windows driver path** + scripted Calculator / browser demos.
-Full VLM planning stays thin; demos succeed with `ScriptedProvider` (no LLM).
+Phase 0/1 — **real Windows driver path** + scripted Calculator / browser demos,
+plus **real model providers** (Ollama, llama.cpp, OpenAI-compatible, OpenAI,
+Anthropic) chosen through [`wincua.toml`](./docs/config.md). Demos stay scripted
+by default (`ScriptedProvider`, no LLM); `--provider` / `--config` plan with a model.
 
 ## Supported Python
 
@@ -33,7 +35,7 @@ PyPI check (Nov 2026): `pywin32==312` ships `pywin32-312-cp315-cp315-win_amd64.w
 | --- | --- | --- |
 | `wincua` | `from wincua import Agent` | Agent observe/act loop + façade |
 | `wincua-driver` | `wincua_driver` | observe / act (`null` \| `mock` \| `windows`) |
-| `wincua-providers` | `wincua_providers` | Ollama, OpenAI-compat, Null, **Scripted** |
+| `wincua-providers` | `wincua_providers` | Ollama, llama.cpp, OpenAI-compat, OpenAI, Anthropic, Null, Scripted (stdlib HTTP, no extra deps) |
 | `wincua-hitl` | `wincua_hitl` | Local HITL UI + `ask_human` |
 | `wincua-mcp` | `wincua_mcp` | MCP server (`wincua-mcp`) |
 | `wincua-excel` | — | Post-MVP pack (stub) |
@@ -109,6 +111,39 @@ $env:WINCUA_LAUNCH_TIMEOUT_S = "60"
 | Browser fails immediately | Edge/Chrome not on `PATH` | Driver resolves under Program Files |
 | `file://` missing | Outside repo checkout | Demo checks `examples/fixtures/form.html` |
 
+## Run with a real model
+
+Pick the provider in `wincua.toml` (copy [`wincua.example.toml`](./wincua.example.toml);
+full reference: [docs/config.md](./docs/config.md)). If the chosen provider is
+unreachable, wincua tries `[provider].fallback`, ending in `null` (ask the human).
+
+```powershell
+copy wincua.example.toml wincua.toml
+python -m wincua.config --probe            # which file, which chain, what is reachable
+
+# Ollama (default in the example)
+ollama pull qwen2.5vl:7b
+python examples/calculator_llm_demo.py --provider ollama
+
+# llama.cpp — llama-server with tool calls (--jinja) and vision (mmproj via -hf)
+llama-server -hf ggml-org/Qwen2.5-VL-7B-Instruct-GGUF --jinja --port 8080
+python examples/calculator_llm_demo.py --provider llamacpp
+
+# Cloud — keys come from env vars, never from the file
+$env:ANTHROPIC_API_KEY = "sk-ant-..."
+python examples/calculator_llm_demo.py --provider anthropic
+$env:OPENAI_API_KEY = "sk-..."
+python examples/calculator_llm_demo.py --provider openai
+
+# The scripted demos take the same flags
+python examples/calculator_arith_demo.py --provider ollama
+python examples/browser_form_demo.py --provider anthropic
+```
+
+`calculator_llm_demo.py --check` probes the chain; `--mock` runs the model against
+a fake Calculator on any OS. After the model calls `done`, the demo reads the
+display itself and checks 42.
+
 ### Without a Windows desktop (CI / Linux / macOS)
 
 ```bash
@@ -135,7 +170,7 @@ from wincua_providers.base import PlanStep
 
 agent = Agent(
     task="Open Calculator and compute 17 + 25",
-    provider=ScriptedProvider([...]),  # or OllamaProvider / NullProvider
+    provider=ScriptedProvider([...]),  # or OllamaProvider(), "anthropic", or None = wincua.toml
     allow=["CalculatorApp.exe", "ApplicationFrameHost.exe", "calc.exe"],
     backend="windows",  # auto on Win32; use "mock" in tests
     mode="foreground",

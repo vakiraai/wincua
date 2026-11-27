@@ -32,3 +32,6 @@ recordings/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local config (copy from wincua.example.toml)
+wincua.toml

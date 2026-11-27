@@ -22,6 +22,16 @@ class AgentResult:
 
 @dataclass
 class Agent:
+    """Observe → plan → act loop.
+
+    ``provider`` may be a provider instance, a provider name from the config
+    (``"ollama"``, ``"anthropic"``…) or ``None`` to use ``[provider].default``.
+    Named / default providers are wrapped with the config's ``fallback`` chain,
+    which always ends in ``null`` (ask the human). ``config`` is a
+    :class:`wincua.config.WincuaConfig`, a path to ``wincua.toml``, or ``None``
+    for the standard lookup.
+    """
+
     task: str
     provider: Any = None
     hitl: Any = None
@@ -31,12 +41,28 @@ class Agent:
     backend: str | None = None
     max_turns: int = 64
     observe_target: str = "foreground"
+    config: Any = None
+    # LLM planners only: give up after this many failed tools / empty replies in a row.
+    max_consecutive_errors: int = 5
 
     def __post_init__(self) -> None:
-        if self.provider is None:
-            from wincua_providers import NullProvider
+        if self.provider is None or isinstance(self.provider, str) or self.config is not None:
+            from wincua.config import WincuaConfig, load_config
 
-            self.provider = NullProvider()
+            if not isinstance(self.config, WincuaConfig):
+                self.config = load_config(self.config)
+            cfg = self.config
+            if self.provider is None or isinstance(self.provider, str):
+                self.provider = cfg.build_provider(self.provider)
+            if self.backend is None and cfg.driver.backend:
+                self.backend = cfg.driver.backend
+            extra = [a for a in cfg.driver.allow if a not in self.allow]
+            if extra:
+                self.allow = [*self.allow, *extra]
+
+    @property
+    def provider_name(self) -> str:
+        return getattr(self.provider, "name", type(self.provider).__name__)
 
     def _ensure_backend(self) -> None:
         from wincua_driver.backend import get_backend, set_backend
@@ -62,7 +88,12 @@ class Agent:
                 current.set_allow(allow)  # type: ignore[attr-defined]
             return
 
-        if name == "windows":
+        timeout = getattr(getattr(self.config, "driver", None), "launch_timeout_s", None)
+        if name == "windows" and timeout:
+            from wincua_driver.backend.windows import WindowsBackend
+
+            set_backend(WindowsBackend(allow=allow, launch_timeout_s=timeout))
+        elif name == "windows":
             set_backend("windows", allow=allow)
         else:
             set_backend(name)
@@ -116,6 +147,7 @@ class Agent:
         history: list[dict[str, Any]] = []
         last_obs: Any = None
         target = self.observe_target
+        error_streak = 0
 
         for turn in range(self.max_turns):
             obs = await observe(target=target, include=["uia", "app", "screenshot"])
@@ -140,15 +172,31 @@ class Agent:
                 {
                     "kind": "plan",
                     "turn": turn,
-                    "provider": getattr(self.provider, "name", type(self.provider).__name__),
+                    "provider": plan.provider or self.provider_name,
                     "available": plan.available,
                     "plan_steps": [
                         {"kind": s.kind, "name": s.name, "args": s.args, "message": s.message}
                         for s in plan.steps
                     ],
                     "error": plan.error,
+                    "text": plan.text,
                 }
             )
+            recovers = bool(getattr(self.provider, "recovers_from_errors", False))
+
+            if not plan.steps and plan.available and recovers:
+                # Model answered without a tool call: show it the nudge and retry.
+                history.append({"kind": "model_text", "turn": turn, "text": plan.text or ""})
+                error_streak += 1
+                if error_streak < self.max_consecutive_errors:
+                    continue
+                recording = await session.end()
+                return AgentResult(
+                    ok=False,
+                    steps=steps,
+                    recording_path=recording,
+                    message=f"model returned no tool call {error_streak} times in a row",
+                )
 
             if not plan.steps:
                 # NullProvider-style: route to HITL once, then abort if no answer
@@ -180,9 +228,14 @@ class Agent:
 
             for pstep in plan.steps:
                 assert isinstance(pstep, PlanStep)
-                history.append(
-                    {"kind": pstep.kind, "name": pstep.name, "args": pstep.args}
-                )
+                entry: dict[str, Any] = {
+                    "kind": pstep.kind,
+                    "name": pstep.name,
+                    "args": pstep.args,
+                    "call_id": pstep.call_id,
+                    "turn": turn,
+                }
+                history.append(entry)
 
                 if pstep.kind == "done":
                     finished = True
@@ -206,6 +259,7 @@ class Agent:
                         risk=(pstep.args or {}).get("risk", "info"),
                     )
                     steps.append({"kind": "ask_human", "answer": answer})
+                    entry["result"] = {"answer": answer}
                     if answer is None:
                         finished = True
                         ok = False
@@ -230,17 +284,28 @@ class Agent:
                     last_obs=last_obs,
                 )
                 steps.append(result_record)
+                entry["result"] = {
+                    k: result_record[k]
+                    for k in ("ok", "message", "display", "info")
+                    if result_record.get(k) is not None
+                }
+                if result_record.get("ok") is False and recovers:
+                    # LLM planners see the failure in history and re-plan.
+                    error_streak += 1
+                    if error_streak < self.max_consecutive_errors:
+                        break
                 if result_record.get("ok") is False:
                     finished = True
                     ok = False
                     message = result_record.get("message") or "tool failed"
                     break
+                error_streak = 0
                 # Allow scripts to retarget observe
                 if tool_name in ("observe", "focus", "launch", "open_url") and args.get(
                     "target"
                 ):
                     target = str(args["target"])
-                elif tool_name == "launch" and args.get("title"):
+                elif tool_name in ("launch", "focus") and args.get("title"):
                     target = str(args["title"])
                 elif tool_name == "open_url":
                     target = str(args.get("target") or target)
@@ -361,6 +426,8 @@ class Agent:
 
         if name in ("type", "type_text"):
             eid = args.get("element_id")
+            if eid and str(eid).startswith("auto:") and not args.get("auto_id"):
+                args["auto_id"] = str(eid)[5:]
             if not eid and args.get("auto_id"):
                 eid = f"auto:{args['auto_id']}"
             if not eid and args.get("name"):
@@ -394,6 +461,8 @@ class Agent:
 
         if name in ("invoke", "uia.invoke"):
             eid = args.get("element_id")
+            if eid and str(eid).startswith("auto:") and not args.get("auto_id"):
+                args["auto_id"] = str(eid)[5:]
             if not eid and args.get("auto_id"):
                 eid = f"auto:{args['auto_id']}"
             if not eid and args.get("name"):
@@ -430,7 +499,10 @@ class Agent:
             "kind": "tool",
             "name": name,
             "ok": False,
-            "message": f"Unknown tool: {tool_name!r}",
+            "message": (
+                f"Unknown tool: {tool_name!r} (use launch, focus, open_url, invoke, type, "
+                "click, key, wait, ask_human, done or abort)"
+            ),
         }
 
     async def _assert_text(
