@@ -1,0 +1,159 @@
+"""Shared prompt pieces: system prompt, observation text, history grouping."""
+
+from __future__ import annotations
+
+import base64
+import json
+import struct
+from dataclasses import dataclass, field
+from typing import Any, Sequence
+
+SYSTEM_PROMPT = """\
+You are wincua, a computer-use agent operating real Windows desktop apps through \
+UI Automation (UIA) tools.
+
+Each turn you receive the current observation of the target window: a list of UI \
+elements (element_id | role | name | patterns), app state, errors and, when \
+available, a screenshot. Act with the provided tools.
+
+Rules:
+- Prefer invoke/type with element_id, auto_id or name from the observation over x/y clicks.
+- Take one or a few actions per turn, then look at the new observation.
+- If an action fails, read the error and try something else.
+- Call done(message) only when the task is complete and the result is visible.
+- Call ask_human(question) if the task is ambiguous, risky or you are stuck; \
+call abort(reason) if it is impossible.
+- Never act on apps outside the task."""
+
+MAX_ELEMENTS = 150
+MAX_HISTORY_TURNS = 12
+
+
+def observation_text(observation: Any, *, max_elements: int = MAX_ELEMENTS) -> str:
+    if observation is None:
+        return "No observation available."
+    lines: list[str] = []
+    app = getattr(observation, "app", None)
+    if app:
+        target = app.get("target") or app.get("title")
+        if target:
+            lines.append(f"Target window: {target}")
+        rest = {k: v for k, v in app.items() if k not in {"target"} and v not in (None, "")}
+        if rest:
+            lines.append(f"App state: {json.dumps(rest, ensure_ascii=False, default=str)}")
+    errors = getattr(observation, "errors", None) or []
+    for err in errors:
+        lines.append(f"Error [{getattr(err, 'code', '?')}]: {getattr(err, 'message', err)}")
+    uia = list(getattr(observation, "uia", None) or [])
+    if uia:
+        lines.append(f"UI elements ({min(len(uia), max_elements)} of {len(uia)}):")
+        lines.append("element_id | role | name | patterns")
+        for el in uia[:max_elements]:
+            patterns = ",".join(getattr(el, "patterns", ()) or ())
+            lines.append(f"{el.element_id} | {el.role} | {el.name} | {patterns}")
+    else:
+        lines.append("UI elements: none (window missing or no UIA tree).")
+    return "\n".join(lines)
+
+
+def screenshot_png(observation: Any) -> bytes | None:
+    shot = getattr(observation, "screenshot", None)
+    data = getattr(shot, "data", None) if shot is not None else None
+    if not data or not isinstance(data, (bytes, bytearray)):
+        return None
+    return bytes(data)
+
+
+def screenshot_b64(observation: Any) -> str | None:
+    data = screenshot_png(observation)
+    return base64.b64encode(data).decode("ascii") if data else None
+
+
+def png_size(data: bytes) -> tuple[int, int] | None:
+    if len(data) >= 24 and data[:8] == b"\x89PNG\r\n\x1a\n":
+        w, h = struct.unpack(">II", data[16:24])
+        return int(w), int(h)
+    return None
+
+
+def window_origin(observation: Any) -> tuple[int, int]:
+    """Screen offset of the window screenshot (first UIA element is the window)."""
+    uia = getattr(observation, "uia", None) or []
+    if uia and getattr(uia[0], "bounds", None):
+        left, top = uia[0].bounds[0], uia[0].bounds[1]
+        return int(left), int(top)
+    return 0, 0
+
+
+def user_turn_text(task: str, observation: Any, *, first: bool) -> str:
+    obs = observation_text(observation)
+    if first:
+        return f"Task: {task}\n\nCurrent observation:\n{obs}"
+    return f"Current observation:\n{obs}\n\nContinue the task: {task}"
+
+
+@dataclass
+class ToolCallRecord:
+    call_id: str
+    name: str
+    args: dict[str, Any]
+    result: str
+
+
+@dataclass
+class Turn:
+    index: int
+    text: str | None = None
+    calls: list[ToolCallRecord] = field(default_factory=list)
+
+
+def result_text(entry: dict[str, Any]) -> str:
+    if entry.get("kind") == "ask_human":
+        answer = (entry.get("result") or {}).get("answer")
+        return f"Human answered: {answer}" if answer is not None else "No human answer."
+    res = entry.get("result")
+    if res is None:
+        return "ok"
+    parts = ["ok" if res.get("ok", True) else "FAILED"]
+    if res.get("message"):
+        parts.append(str(res["message"]))
+    for key in ("display", "info"):
+        if res.get(key):
+            parts.append(f"{key}={json.dumps(res[key], ensure_ascii=False, default=str)[:300]}")
+    return ": ".join(parts[:2]) + ("; " + "; ".join(parts[2:]) if len(parts) > 2 else "")
+
+
+def group_history(
+    history: Sequence[dict[str, Any]] | None, *, max_turns: int = MAX_HISTORY_TURNS
+) -> list[Turn]:
+    """Group the Agent's flat history into model turns (assistant calls + results)."""
+    turns: dict[int, Turn] = {}
+    order: list[int] = []
+    for i, entry in enumerate(history or []):
+        idx = int(entry.get("turn", i))
+        if idx not in turns:
+            turns[idx] = Turn(index=idx)
+            order.append(idx)
+        turn = turns[idx]
+        if entry.get("kind") == "model_text":
+            turn.text = entry.get("text") or ""
+            continue
+        name = entry.get("name") or entry.get("kind") or "tool"
+        call_id = entry.get("call_id") or f"call_{idx}_{len(turn.calls)}"
+        turn.calls.append(
+            ToolCallRecord(
+                call_id=str(call_id),
+                name=str(name),
+                args=dict(entry.get("args") or {}),
+                result=result_text(entry),
+            )
+        )
+    return [turns[i] for i in order][-max_turns:]
+
+
+NUDGE = "Reply with a tool call (or done / abort / ask_human)."
+
+
+def clean_args(args: dict[str, Any]) -> dict[str, Any]:
+    """Drop provider-private keys (``_cu`` etc.) before echoing args to a model."""
+    return {k: v for k, v in args.items() if not k.startswith("_")}

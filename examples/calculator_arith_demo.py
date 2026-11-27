@@ -9,6 +9,10 @@ Flow:
 1. Launch/focus Calculator.
 2. Clear, enter 17 + 25, press = via UIA Invoke (AutomationIds).
 3. Read display via UIA (``CalculatorResults``); assert golden 42.
+
+By default the steps are scripted (no LLM). ``--provider NAME`` / ``--config
+PATH`` plan with a real model from ``wincua.toml`` instead (same flow as
+``calculator_llm_demo.py``).
 """
 
 from __future__ import annotations
@@ -98,7 +102,16 @@ async def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Override launch wait seconds (also: env WINCUA_LAUNCH_TIMEOUT_S)",
     )
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _llm_common import add_provider_args, load_demo_config, wants_model  # noqa: E402
+
+    add_provider_args(parser)
     args = parser.parse_args(argv)
+    cfg = None
+    if wants_model(args):
+        cfg = load_demo_config(args)
+        if cfg is None:
+            return 1
 
     from wincua import Agent
     from wincua_driver import is_windows
@@ -127,6 +140,13 @@ async def main(argv: list[str] | None = None) -> int:
             import os
 
             os.environ["WINCUA_LAUNCH_TIMEOUT_S"] = str(args.timeout)
+
+    if cfg is not None:
+        from calculator_llm_demo import run_with_model
+
+        args.max_turns = 25
+        print("calculator_arith_demo (model-planned)")
+        return await run_with_model(args, backend, cfg)
 
     steps = build_calculator_steps()
     if args.timeout is not None:

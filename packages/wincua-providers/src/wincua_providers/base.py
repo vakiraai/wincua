@@ -14,6 +14,7 @@ class PlanStep:
     name: str | None = None
     args: dict[str, Any] = field(default_factory=dict)
     message: str | None = None
+    call_id: str | None = None  # model tool-call id, echoed back with the result
 
 
 @dataclass
@@ -22,6 +23,8 @@ class ProviderResult:
     raw: Any = None
     available: bool = True
     error: str | None = None
+    provider: str | None = None  # name of the provider that produced this result
+    text: str | None = None  # free text the model returned alongside / instead of tool calls
 
 
 class Provider(Protocol):
