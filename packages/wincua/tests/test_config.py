@@ -70,6 +70,7 @@ def test_example_file_parses_and_builds_chain():
     assert cfg.driver.backend == "windows" and cfg.driver.launch_timeout_s == 45
     assert {"CalculatorApp.exe", "ApplicationFrameHost.exe", "calc.exe"} <= set(cfg.driver.allow)
     assert cfg.raw["mcp"]["max_elements"] == 150 and cfg.raw["hitl"]["port"] == 8765
+    assert cfg.raw["hitl"]["timeout_s"] == 300 and cfg.raw["hitl"]["open_browser"] is True
     chain = cfg.build_provider()
     assert isinstance(chain, FallbackProvider) and chain.chain == ["ollama", "null"]
     ollama = chain.providers[0]

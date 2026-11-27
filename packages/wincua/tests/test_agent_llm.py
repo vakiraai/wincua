@@ -44,7 +44,7 @@ def test_ollama_plans_calculator_on_mock():
     t.add(
         200,
         ollama_tool_reply(
-            ("invoke", {"element_id": "auto:num2Button"}),
+            ("invoke", {"auto_id": "num2Button"}),
             ("invoke", {"name": "x", "auto_id": "num5Button"}),
             ("invoke", {"auto_id": "equalButton"}),
         ),

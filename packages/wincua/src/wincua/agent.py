@@ -22,16 +22,6 @@ class AgentResult:
 
 @dataclass
 class Agent:
-    """Observe → plan → act loop.
-
-    ``provider`` may be a provider instance, a provider name from the config
-    (``"ollama"``, ``"anthropic"``…) or ``None`` to use ``[provider].default``.
-    Named / default providers are wrapped with the config's ``fallback`` chain,
-    which always ends in ``null`` (ask the human). ``config`` is a
-    :class:`wincua.config.WincuaConfig`, a path to ``wincua.toml``, or ``None``
-    for the standard lookup.
-    """
-
     task: str
     provider: Any = None
     hitl: Any = None
@@ -39,26 +29,42 @@ class Agent:
     mode: Mode = "foreground"
     recorder: bool = False
     backend: str | None = None
-    max_turns: int = 64
-    observe_target: str = "foreground"
+    # wincua.config.WincuaConfig, a path to wincua.toml, or None for the standard lookup.
     config: Any = None
     # LLM planners only: give up after this many failed tools / empty replies in a row.
     max_consecutive_errors: int = 5
+    max_turns: int = 64
+    observe_target: str = "foreground"
 
     def __post_init__(self) -> None:
-        if self.provider is None or isinstance(self.provider, str) or self.config is not None:
-            from wincua.config import WincuaConfig, load_config
+        self._apply_config()
+        if self.provider is None:
+            from wincua_providers import NullProvider
 
-            if not isinstance(self.config, WincuaConfig):
-                self.config = load_config(self.config)
-            cfg = self.config
-            if self.provider is None or isinstance(self.provider, str):
-                self.provider = cfg.build_provider(self.provider)
-            if self.backend is None and cfg.driver.backend:
-                self.backend = cfg.driver.backend
-            extra = [a for a in cfg.driver.allow if a not in self.allow]
-            if extra:
-                self.allow = [*self.allow, *extra]
+            self.provider = NullProvider()
+
+    def _apply_config(self) -> None:
+        """Build the provider from wincua.toml when none (or a name) is given.
+
+        ``provider`` may be an instance, a provider name from the config
+        (``"ollama"``, ``"anthropic"``…) or ``None`` for ``[provider].default``.
+        Named / default providers get the config's ``fallback`` chain, which
+        always ends in ``null`` (ask the human).
+        """
+        if not (self.provider is None or isinstance(self.provider, str) or self.config is not None):
+            return
+        from wincua.config import WincuaConfig, load_config
+
+        if not isinstance(self.config, WincuaConfig):
+            self.config = load_config(self.config)
+        cfg = self.config
+        if self.provider is None or isinstance(self.provider, str):
+            self.provider = cfg.build_provider(self.provider)
+        if self.backend is None and cfg.driver.backend:
+            self.backend = cfg.driver.backend
+        extra = [a for a in cfg.driver.allow if a not in self.allow]
+        if extra:
+            self.allow = [*self.allow, *extra]
 
     @property
     def provider_name(self) -> str:
@@ -228,14 +234,11 @@ class Agent:
 
             for pstep in plan.steps:
                 assert isinstance(pstep, PlanStep)
-                entry: dict[str, Any] = {
-                    "kind": pstep.kind,
-                    "name": pstep.name,
-                    "args": pstep.args,
-                    "call_id": pstep.call_id,
-                    "turn": turn,
-                }
-                history.append(entry)
+                history.append(
+                    {"kind": pstep.kind, "name": pstep.name, "args": pstep.args}
+                )
+                entry = history[-1]
+                entry.update(call_id=pstep.call_id, turn=turn)
 
                 if pstep.kind == "done":
                     finished = True
@@ -461,8 +464,6 @@ class Agent:
 
         if name in ("invoke", "uia.invoke"):
             eid = args.get("element_id")
-            if eid and str(eid).startswith("auto:") and not args.get("auto_id"):
-                args["auto_id"] = str(eid)[5:]
             if not eid and args.get("auto_id"):
                 eid = f"auto:{args['auto_id']}"
             if not eid and args.get("name"):
