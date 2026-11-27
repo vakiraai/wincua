@@ -2,7 +2,7 @@
 name = "wincua-excel"
 version = "0.1.0"
 description = "wincua Excel COM / semantic tools (post-MVP pack — stub)"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 license = { text = "MIT" }
 authors = [{ name = "wincua contributors" }]
 dependencies = []

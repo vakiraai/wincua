@@ -2,7 +2,7 @@
 name = "wincua-slicer"
 version = "0.1.0"
 description = "wincua 3D Slicer helpers (Phase 2 pack — stub)"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 license = { text = "MIT" }
 authors = [{ name = "wincua contributors" }]
 dependencies = []

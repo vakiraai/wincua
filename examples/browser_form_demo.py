@@ -120,6 +120,9 @@ async def main(argv: list[str] | None = None) -> int:
     from wincua_driver.backend.windows import resolve_browser_executable
     from wincua_providers import ScriptedProvider
 
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _windows_preflight import require_windows_uia_stack  # noqa: E402
+
     if not FIXTURE.is_file():
         print(f"Missing fixture: {FIXTURE}", file=sys.stderr)
         print("Run from the repo checkout so examples/fixtures/form.html exists.", file=sys.stderr)
@@ -140,6 +143,8 @@ async def main(argv: list[str] | None = None) -> int:
         )
         return 1
     else:
+        if require_windows_uia_stack() != 0:
+            return 1
         backend = "windows"
         if args.timeout is not None:
             import os

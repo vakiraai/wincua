@@ -25,6 +25,9 @@ silently fall back.
 
 ## Launch notes (Win11)
 
+- **Python:** host UIA path supports **CPython 3.11–3.13** (`requires-python >=3.11,<3.15`).
+  On 3.15, `pip show pywinauto` can succeed while `import pywinauto` fails inside
+  pywin32/comtypes — errors now include the full exception chain + `sys.version`.
 - Calculator: prefer `calculator:` / `shell:AppsFolder\Microsoft.WindowsCalculator_…!App`
   over `Application.start("calc.exe")` (stub process → pywinauto timeout).
 - Browsers: resolve Edge/Chrome via `PATH` then common `Program Files` locations.

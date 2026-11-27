@@ -15,6 +15,17 @@ or a human in a small local HITL UI.
 Phase 0/1 — **real Windows driver path** + scripted Calculator / browser demos.
 Full VLM planning stays thin; demos succeed with `ScriptedProvider` (no LLM).
 
+## Supported Python (important)
+
+| Use | Python |
+| --- | --- |
+| **Windows host demos / UIA** | **CPython 3.11–3.13** (recommended) |
+| 3.14 | Experimental — may work with recent `pywin32` / `comtypes` |
+| **3.15** | **Not supported yet** — `pip show pywinauto` can succeed while `import pywinauto` fails inside pywin32/comtypes |
+| CI / import-only / `--mock` | Same `requires-python`: `>=3.11,<3.15` |
+
+Packages declare `requires-python = ">=3.11,<3.15"`.
+
 ## Packages
 
 | Package | Import | Role |
@@ -29,32 +40,39 @@ Full VLM planning stays thin; demos succeed with `ScriptedProvider` (no LLM).
 
 ## Install
 
+Always use **`python -m pip`** with the **same** interpreter that will run the demos
+(`sys.executable`). Bare `pip` often targets a different env.
+
 ### Any OS (import + mock demos + tests)
 
 ```bash
-pip install -e packages/wincua-driver
-pip install -e packages/wincua-providers
-pip install -e packages/wincua-hitl
-pip install -e packages/wincua-mcp
-pip install -e packages/wincua
-pip install pytest
-pytest
+python -m pip install -e packages/wincua-driver
+python -m pip install -e packages/wincua-providers
+python -m pip install -e packages/wincua-hitl
+python -m pip install -e packages/wincua-mcp
+python -m pip install -e packages/wincua
+python -m pip install pytest
+python -m pytest
 ```
 
 Or with uv from the monorepo root: `uv sync`
 
-### Windows 11 host (real UIA)
+### Windows 11 host (real UIA) — use Python 3.11–3.13
 
-```bash
-# pywinauto + Pillow for UIA / screenshots
-pip install -e "packages/wincua-driver[windows]"
-pip install -e packages/wincua-providers
-pip install -e packages/wincua-hitl
-pip install -e "packages/wincua[windows]"
+```powershell
+# Create / activate a 3.11–3.13 venv if your default is 3.15+
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+python -m pip install -U pip
+python -m pip install -e "packages/wincua-driver[windows]"
+python -m pip install -e packages/wincua-providers packages/wincua-hitl
+python -m pip install -e "packages/wincua[windows]"
+
+# Verify THIS interpreter can import (not just that the wheel is installed)
+python -m pip show pywinauto pywin32 comtypes
+python -c "import sys, pywinauto; print(sys.executable, sys.version); print(pywinauto.__version__)"
 ```
-
-Equivalent meta extras: `pip install -e ".[windows]"` from the repo root after
-editable installs of workspace members, or `pip install -e "packages/wincua[windows]"`.
 
 ## Run demos (Win11 interactive desktop)
 
@@ -63,15 +81,8 @@ Open Calculator once from Start if it has never been launched on this account.
 
 ```powershell
 cd path\to\wincua
-
-python -m pip install -e "packages/wincua-driver[windows]"
-python -m pip install -e packages/wincua-providers packages/wincua-hitl
-python -m pip install -e "packages/wincua[windows]"
-
-# Calculator: calculator: protocol / AppsFolder launch → 17+25= → assert 42
+# same venv / same python as install above
 python examples/calculator_arith_demo.py
-
-# Browser: resolves Edge/Chrome under Program Files, opens local form fixture
 python examples/browser_form_demo.py
 python examples/browser_form_demo.py --browser chrome
 
@@ -80,14 +91,15 @@ python examples/calculator_arith_demo.py --timeout 60
 $env:WINCUA_LAUNCH_TIMEOUT_S = "60"
 ```
 
-### Launch troubleshooting
+### Launch / import troubleshooting
 
-| Symptom | Likely cause | What we do / what you can try |
+| Symptom | Likely cause | What to do |
 | --- | --- | --- |
-| Timeout, app never appears | `Application.start("calc.exe")` waits on a stub that exits | Driver uses `calculator:` / `shell:AppsFolder\…Calculator…` instead |
-| Timeout, wrong window | Title match too strict / lazy UIA spec | Enumerate top-level titles; errors list **visible titles** |
-| Browser fails immediately | `msedge.exe` not on `PATH` | Resolve under `Program Files\Microsoft\Edge\…`; actionable missing-binary error |
-| `file://` missing | Running outside the repo | Demo checks `examples/fixtures/form.html` and prints the absolute path |
+| `import pywinauto` fails but `pip show` works | Dep import (pywin32/comtypes), often **Python 3.15** | Use **3.11–3.13**; demos now print full exception chain + `sys.version` |
+| Timeout, app never appears | Old `Application.start("calc.exe")` stub wait | Driver uses `calculator:` / AppsFolder launch |
+| Timeout, wrong window | Title mismatch | Errors list **visible titles** |
+| Browser fails immediately | Edge/Chrome not on `PATH` | Driver resolves under Program Files |
+| `file://` missing | Outside repo checkout | Demo checks `examples/fixtures/form.html` |
 
 ### Without a Windows desktop (CI / Linux / macOS)
 
@@ -134,7 +146,7 @@ obs = await observe(target="Calculator", include=["uia", "app"])
 ## MCP
 
 ```bash
-pip install -e packages/wincua-mcp
+python -m pip install -e packages/wincua-mcp
 wincua-mcp          # or: python -m wincua_mcp
 ```
 
@@ -143,4 +155,5 @@ desktop being driven.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE). Driver path uses [pywinauto](https://github.com/pywinauto/pywinauto) (BSD/MIT-friendly stack); optional Cua wrap remains a future extra, not required.
+MIT — see [LICENSE](./LICENSE). Driver path uses [pywinauto](https://github.com/pywinauto/pywinauto) (BSD);
+optional Cua wrap remains a future extra, not required.

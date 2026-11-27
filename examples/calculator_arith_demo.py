@@ -105,6 +105,10 @@ async def main(argv: list[str] | None = None) -> int:
     from wincua_driver.backend import set_backend
     from wincua_providers import ScriptedProvider
 
+    # Local helper next to demos (same checkout)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _windows_preflight import require_windows_uia_stack  # noqa: E402
+
     if args.mock:
         set_backend("mock")
         backend = "mock"
@@ -116,6 +120,8 @@ async def main(argv: list[str] | None = None) -> int:
         )
         return 1
     else:
+        if require_windows_uia_stack() != 0:
+            return 1
         backend = "windows"
         if args.timeout is not None:
             import os

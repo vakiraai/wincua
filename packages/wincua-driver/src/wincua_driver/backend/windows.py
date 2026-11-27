@@ -63,6 +63,125 @@ def windows_unavailable_error(what: str = "WindowsBackend") -> StructuredError:
     )
 
 
+# Host UIA stack (pywinauto + pywin32/comtypes) is reliable on CPython 3.11–3.13.
+# 3.14 may work with recent wheels; 3.15 often breaks `import pywinauto` via deps.
+_SUPPORTED_WINDOWS_PYTHON = "CPython 3.11–3.13 (3.14 experimental; 3.15 not supported yet)"
+
+
+def _exception_chain(exc: BaseException) -> list[BaseException]:
+    seen: set[int] = set()
+    out: list[BaseException] = []
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        out.append(cur)
+        cur = cur.__cause__ or cur.__context__
+    return out
+
+
+def format_pywinauto_import_error(cause: BaseException) -> str:
+    """Full diagnostic when ``import pywinauto`` fails (missing package OR dep crash)."""
+    import traceback
+    from importlib.util import find_spec
+
+    exe = sys.executable
+    quoted = f'"{exe}"' if " " in exe else exe
+    py_ver = sys.version.replace("\n", " ")
+    major_minor = f"{sys.version_info.major}.{sys.version_info.minor}"
+
+    spec = None
+    try:
+        spec = find_spec("pywinauto")
+    except Exception as spec_exc:  # pragma: no cover - defensive
+        spec = None
+        spec_note = f"find_spec('pywinauto') also failed: {spec_exc!r}"
+    else:
+        spec_note = (
+            f"find_spec('pywinauto') = {spec.origin!r}"
+            if spec is not None
+            else "find_spec('pywinauto') = None (package not on sys.path)"
+        )
+
+    chain = _exception_chain(cause)
+    chain_lines = "\n".join(f"  - {type(e).__name__}: {e!r}" for e in chain)
+    tb = "".join(traceback.format_exception(type(cause), cause, cause.__traceback__))
+
+    missing_pkg = (
+        isinstance(cause, ModuleNotFoundError)
+        and getattr(cause, "name", None) == "pywinauto"
+        and spec is None
+    )
+
+    if missing_pkg:
+        headline = (
+            "pywinauto is not installed for this interpreter "
+            "(ModuleNotFoundError for 'pywinauto')."
+        )
+        remedy = (
+            "Install into THIS same interpreter (prefer python -m pip, never bare pip):\n"
+            f"  {quoted} -m pip install \"pywinauto>=0.6.8\" \"Pillow>=10.0\" "
+            "\"comtypes>=1.4.8\" pywin32\n"
+            f"  {quoted} -m pip install -e \"packages/wincua-driver[windows]\"\n"
+            f"  {quoted} -m pip install -e \"packages/wincua[windows]\"\n"
+            "Verify:\n"
+            f"  {quoted} -m pip show pywinauto pywin32 comtypes\n"
+            f"  {quoted} -c \"import pywinauto; print(pywinauto.__version__)\""
+        )
+    else:
+        headline = (
+            "pywinauto is present but `import pywinauto` failed — usually a "
+            "dependency import error (pywin32 / comtypes), not a missing pip install."
+        )
+        remedy = (
+            "Inspect the exception chain below. On Python 3.15, comtypes <1.5.0 and "
+            "older pywin32 builds are known to break; the supported host path is "
+            f"{_SUPPORTED_WINDOWS_PYTHON}.\n"
+            "Options:\n"
+            f"  1) Prefer a 3.11–3.13 venv and reinstall extras with that interpreter.\n"
+            f"  2) Try upgrading deps in-place (may still fail on 3.15):\n"
+            f"       {quoted} -m pip install -U \"comtypes>=1.5.0\" \"pywin32>=308\"\n"
+            f"  3) Re-run the import to see the raw traceback:\n"
+            f"       {quoted} -c \"import pywinauto\""
+        )
+
+    version_warn = ""
+    if sys.version_info >= (3, 15):
+        version_warn = (
+            f"\nWARNING: CPython {major_minor} is outside the supported Windows host "
+            f"range ({_SUPPORTED_WINDOWS_PYTHON}).\n"
+        )
+
+    return (
+        f"{headline}\n"
+        f"{version_warn}"
+        f"  sys.executable = {exe}\n"
+        f"  sys.version    = {py_ver}\n"
+        f"  {spec_note}\n"
+        f"Exception chain:\n{chain_lines}\n"
+        f"Traceback:\n{tb}"
+        f"{remedy}"
+    )
+
+
+def ensure_pywinauto() -> None:
+    """Import pywinauto or raise RuntimeError with full diagnostics (never swallow)."""
+    try:
+        import pywinauto  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(format_pywinauto_import_error(exc)) from exc
+
+
+def probe_pywinauto() -> tuple[bool, str]:
+    """Return (ok, detail). detail is version string or full import-failure diagnostics."""
+    try:
+        import pywinauto
+
+        ver = getattr(pywinauto, "__version__", "unknown")
+        return True, f"pywinauto {ver} @ {sys.executable} ({sys.version.split()[0]})"
+    except ImportError as exc:
+        return False, format_pywinauto_import_error(exc)
+
+
 def match_window_title(title: str, target: str) -> bool:
     """True if a window title matches a launch/focus target string."""
     if not target:
@@ -173,13 +292,7 @@ class WindowsBackend:
         if not is_windows():
             err = windows_unavailable_error()
             raise RuntimeError(err.message)
-        try:
-            import pywinauto  # noqa: F401
-        except ImportError as exc:  # pragma: no cover - env dependent
-            raise RuntimeError(
-                "WindowsBackend requires pywinauto. "
-                "Install with: pip install -e 'packages/wincua-driver[windows]'"
-            ) from exc
+        ensure_pywinauto()
 
         env_launch = os.environ.get("WINCUA_LAUNCH_TIMEOUT_S")
         env_control = os.environ.get("WINCUA_CONTROL_TIMEOUT_S")
