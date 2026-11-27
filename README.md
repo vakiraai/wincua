@@ -97,6 +97,8 @@ $env:WINCUA_LAUNCH_TIMEOUT_S = "60"
 | --- | --- | --- |
 | `import pywinauto` fails but `pip show` works | Dep import (pywin32/comtypes), often **Python 3.15** | Use **3.11–3.13**; demos now print full exception chain + `sys.version` |
 | Timeout, app never appears | Old `Application.start("calc.exe")` stub wait | Driver uses `calculator:` / AppsFolder launch |
+| Calculator title found, no buttons | UWP: controls under ApplicationFrameHost tree | Deep UIA descendant search + `clearEntryButton` / Escape fallback |
+| Browser steps ok but form empty | Edge reused a multi-tab window / infobar stole focus | `--new-window` + throwaway `--user-data-dir`; UIA ValuePattern fill with verify |
 | Timeout, wrong window | Title mismatch | Errors list **visible titles** |
 | Browser fails immediately | Edge/Chrome not on `PATH` | Driver resolves under Program Files |
 | `file://` missing | Outside repo checkout | Demo checks `examples/fixtures/form.html` |

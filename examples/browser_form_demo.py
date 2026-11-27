@@ -5,23 +5,17 @@
 pass ``--mock`` to exercise the scripted Agent loop.
 
 Flow:
-1. Open ``examples/fixtures/form.html`` via file:// in Edge (Chrome fallback).
-2. Fill name/email and submit via UIA when exposed; otherwise keyboard Tab/type.
-3. Assert the success string appears (UIA name/title or page status).
+1. Open ``examples/fixtures/form.html`` in a **new** Edge/Chrome window with a
+   throwaway profile (avoids reused tabs + first-run infobars stealing focus).
+2. Fill name/email via UIA ValuePattern on the "Full name" / "Email" edits
+   (verified), then Invoke "Submit form".
+3. Assert the success string appears.
 
 ## Limits (honest)
 
-Chromium (Edge/Chrome) accessibility trees for ``file://`` pages are **less
-stable** than Calculator's native UIA. Common failure modes:
-
-- Inputs may lack durable AutomationIds; we prefer ``aria-label`` / Name.
-- Focus can land in the address bar / sidebar — script sends Tab heuristics.
-- Headless / remote desktop / non-interactive sessions will fail.
-- Cross-origin / restricted file:// policies are out of scope; use the bundled fixture.
-
-If UIA fill is unreliable on your build, the keyboard path (Tab → type → Tab →
-type → Enter) is the supported fallback and is what this scripted demo uses
-after focusing the browser window.
+Chromium accessibility for ``file://`` pages is less stable than Calculator UIA.
+Keyboard Tab/type remains a fallback inside the driver when ValuePattern fails.
+Headless / remote / non-interactive sessions will fail.
 """
 
 from __future__ import annotations
@@ -49,7 +43,7 @@ EMAIL_VALUE = "ada@example.com"
 def build_browser_steps(fixture_uri: str):
     from wincua_providers.base import PlanStep
 
-    # Keyboard-first path: reliable across Edge/Chrome a11y variance.
+    # UIA-first path: set Edit values + Invoke submit (keyboard is driver fallback).
     return [
         PlanStep(
             kind="tool",
@@ -59,28 +53,41 @@ def build_browser_steps(fixture_uri: str):
                 "browser": "msedge",
                 "target": "wincua form demo",
                 "timeout_s": 45,
+                "new_window": True,
+                "isolated_profile": True,
             },
         ),
-        PlanStep(kind="tool", name="wait", args={"seconds": 1.0}),
+        PlanStep(kind="tool", name="wait", args={"seconds": 1.5}),
         PlanStep(
             kind="tool",
             name="focus",
             args={"title": "wincua form demo", "timeout_s": 20},
         ),
         PlanStep(kind="tool", name="wait", args={"seconds": 0.4}),
-        # Move focus into the page document, then to the first field.
-        PlanStep(kind="tool", name="key", args={"keys": "F6"}),
-        PlanStep(kind="tool", name="wait", args={"seconds": 0.2}),
-        PlanStep(kind="tool", name="key", args={"keys": "tab"}),
-        PlanStep(kind="tool", name="wait", args={"seconds": 0.15}),
-        PlanStep(kind="tool", name="type", args={"text": NAME_VALUE}),
-        PlanStep(kind="tool", name="key", args={"keys": "tab"}),
-        PlanStep(kind="tool", name="wait", args={"seconds": 0.15}),
-        PlanStep(kind="tool", name="type", args={"text": EMAIL_VALUE}),
-        PlanStep(kind="tool", name="key", args={"keys": "tab"}),
-        PlanStep(kind="tool", name="wait", args={"seconds": 0.15}),
-        PlanStep(kind="tool", name="key", args={"keys": "enter"}),
-        PlanStep(kind="tool", name="wait", args={"seconds": 0.6}),
+        PlanStep(
+            kind="tool",
+            name="type",
+            args={
+                "name": "Full name",
+                "text": NAME_VALUE,
+                "target": "wincua form demo",
+            },
+        ),
+        PlanStep(
+            kind="tool",
+            name="type",
+            args={
+                "name": "Email",
+                "text": EMAIL_VALUE,
+                "target": "wincua form demo",
+            },
+        ),
+        PlanStep(
+            kind="tool",
+            name="invoke",
+            args={"name": "Submit form", "target": "wincua form demo"},
+        ),
+        PlanStep(kind="tool", name="wait", args={"seconds": 0.8}),
         PlanStep(
             kind="tool",
             name="assert_text",
@@ -191,7 +198,7 @@ async def main(argv: list[str] | None = None) -> int:
         print(f"  browser_exe: {resolved_browser}")
     print(f"  allow: {list(agent.allow)}")
     print(f"  provider: {agent.provider.name}")
-    print("  note: Chromium UIA is best-effort; keyboard Tab/type is the reliable path.")
+    print("  note: opens --new-window + throwaway profile; fills via UIA ValuePattern.")
 
     result = await agent.run()
     print(f"result.ok={result.ok} message={result.message!r}")

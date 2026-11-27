@@ -77,3 +77,5 @@ class ActionResult:
     ok: bool
     mode_used: ModeUsed = "null"
     error: StructuredError | None = None
+    # Optional success metadata (e.g. verified field value after type)
+    info: dict[str, Any] | None = None

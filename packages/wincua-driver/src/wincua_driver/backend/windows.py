@@ -9,10 +9,30 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Sequence
 from urllib.parse import unquote, urlparse
+
+# Win11 Calculator: clear may be clearButton or clearEntryButton depending on mode.
+_CALC_AUTO_ID_ALIASES: dict[str, tuple[str, ...]] = {
+    "clearButton": ("clearButton", "clearEntryButton"),
+    "clearEntryButton": ("clearEntryButton", "clearButton"),
+}
+
+# Name fallbacks when AutomationId search fails (localized EN UI).
+_CALC_NAME_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "clearButton": ("Clear", "Clear entry", "Clear Entry"),
+    "clearEntryButton": ("Clear entry", "Clear Entry", "Clear"),
+    "num1Button": ("One",),
+    "num2Button": ("Two",),
+    "num5Button": ("Five",),
+    "num7Button": ("Seven",),
+    "plusButton": ("Plus",),
+    "equalButton": ("Equals", "Equal"),
+    "CalculatorResults": ("Display is", "Result"),
+}
 
 from wincua_driver.types import (
     Action,
@@ -313,6 +333,7 @@ class WindowsBackend:
         self._window: Any = None
         self._target_title: str | None = None
         self._id_seq = 0
+        self._temp_profile_dirs: list[str] = []
 
         # Soften pywinauto global timings so missing windows fail with our errors
         try:
@@ -433,6 +454,81 @@ class WindowsBackend:
                 return None
             time.sleep(0.25)
 
+    def _bind_window(self, window: Any, title: str | None = None) -> None:
+        """Remember the UIA root and warm the wrapper cache via a deep walk."""
+        self._window = window
+        if title:
+            self._target_title = title
+        # Prefetch descendants so later auto:/name: lookups hit cache (UWP Calculator
+        # keeps buttons under ApplicationFrameHost → CalculatorApp content).
+        try:
+            self._walk_uia(window, limit=250)
+        except Exception:
+            pass
+
+    def _deep_find_auto_id(
+        self,
+        root: Any,
+        auto_id: str,
+        *,
+        timeout_s: float = 1.0,
+    ) -> Any | None:
+        """Find a control by AutomationId under a UWP/top-level root (deep search)."""
+        deadline = time.time() + max(0.2, timeout_s)
+        aliases = _CALC_AUTO_ID_ALIASES.get(auto_id, (auto_id,))
+        while time.time() < deadline:
+            for aid in aliases:
+                # 1) child_window from root (searches descendants in UIA backend)
+                try:
+                    ctrl = root.child_window(auto_id=aid)
+                    if ctrl.exists(timeout=0.4):
+                        return ctrl
+                except Exception:
+                    pass
+                try:
+                    ctrl = root.child_window(auto_id=aid, control_type="Button")
+                    if ctrl.exists(timeout=0.3):
+                        return ctrl
+                except Exception:
+                    pass
+                # 2) descendants(auto_id=...)
+                try:
+                    found = root.descendants(auto_id=aid)
+                    if found:
+                        return found[0]
+                except Exception:
+                    pass
+                # 3) Manual walk of descendants (most reliable for UWP hosting)
+                try:
+                    for d in root.descendants():
+                        try:
+                            if (getattr(d.element_info, "automation_id", None) or "") == aid:
+                                return d
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+            # 4) Name fallbacks (EN Calculator)
+            for name in _CALC_NAME_FALLBACKS.get(auto_id, ()):
+                try:
+                    ctrl = root.child_window(title=name, control_type="Button")
+                    if ctrl.exists(timeout=0.3):
+                        return ctrl
+                except Exception:
+                    pass
+                try:
+                    for d in root.descendants():
+                        try:
+                            dname = getattr(d.element_info, "name", None) or ""
+                            if dname == name or (name == "Display is" and dname.startswith("Display is")):
+                                return d
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+            time.sleep(0.2)
+        return None
+
     def _wait_controls(
         self,
         window: Any,
@@ -443,24 +539,22 @@ class WindowsBackend:
         """Wait until one of the AutomationIds is present; return the one found."""
         timeout = self.control_timeout_s if timeout_s is None else timeout_s
         deadline = time.time() + timeout
-        last_err = None
         while time.time() < deadline:
+            remaining = max(0.3, deadline - time.time())
+            per = min(1.5, remaining)
             for auto_id in auto_ids:
-                try:
-                    ctrl = window.child_window(auto_id=auto_id, control_type="Button")
-                    if ctrl.exists(timeout=0.2):
-                        return auto_id
-                except Exception as exc:
-                    last_err = exc
+                ctrl = self._deep_find_auto_id(window, auto_id, timeout_s=per)
+                if ctrl is not None:
+                    self._wrappers[f"auto:{auto_id}"] = ctrl
+                    # Also cache the concrete aid that matched
                     try:
-                        ctrl = window.child_window(auto_id=auto_id)
-                        if ctrl.exists(timeout=0.2):
-                            return auto_id
-                    except Exception as exc2:
-                        last_err = exc2
-            time.sleep(0.2)
-        if last_err:
-            return None
+                        real = getattr(ctrl.element_info, "automation_id", None)
+                        if real:
+                            self._wrappers[f"auto:{real}"] = ctrl
+                    except Exception:
+                        pass
+                    return auto_id
+            time.sleep(0.15)
         return None
 
     def _walk_uia(self, window: Any, limit: int = 120) -> list[ElementRef]:
@@ -527,31 +621,51 @@ class WindowsBackend:
             w = self._wrappers[element_id]
             try:
                 if hasattr(w, "exists") and not w.exists(timeout=0.5):
-                    # Stale cache — fall through to live lookup
                     pass
                 else:
                     return w
             except Exception:
                 return w
-        if self._window is not None:
-            if element_id.startswith("auto:"):
-                auto_id = element_id[5:]
+        if self._window is None:
+            return None
+        if element_id.startswith("auto:"):
+            auto_id = element_id[5:]
+            ctrl = self._deep_find_auto_id(
+                self._window, auto_id, timeout_s=self.control_timeout_s
+            )
+            if ctrl is not None:
+                self._wrappers[element_id] = ctrl
+                self._wrappers[f"auto:{auto_id}"] = ctrl
+                return ctrl
+            return None
+        if element_id.startswith("name:"):
+            name = element_id[5:]
+            # Exact title / name, then contains (aria-label often duplicates)
+            for kwargs in (
+                {"title": name},
+                {"title": name, "control_type": "Edit"},
+                {"title": name, "control_type": "Button"},
+                {"title_re": f".*{re.escape(name)}.*"},
+            ):
                 try:
-                    ctrl = self._window.child_window(auto_id=auto_id)
-                    if ctrl.exists(timeout=self.control_timeout_s):
+                    ctrl = self._window.child_window(**kwargs)
+                    if ctrl.exists(timeout=min(2.0, self.control_timeout_s)):
                         self._wrappers[element_id] = ctrl
                         return ctrl
                 except Exception:
-                    return None
-            if element_id.startswith("name:"):
-                name = element_id[5:]
-                try:
-                    ctrl = self._window.child_window(title=name)
-                    if ctrl.exists(timeout=self.control_timeout_s):
-                        self._wrappers[element_id] = ctrl
-                        return ctrl
-                except Exception:
-                    return None
+                    continue
+            try:
+                for d in self._window.descendants():
+                    try:
+                        dname = getattr(d.element_info, "name", None) or ""
+                        if dname == name or name.lower() in dname.lower():
+                            self._wrappers[element_id] = d
+                            return d
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            return None
         return None
 
     async def observe(self, target: str, include: Sequence[str]) -> Observation:
@@ -577,22 +691,30 @@ class WindowsBackend:
             )
             return Observation(errors=errors)
 
-        self._window = window
-        self._target_title = target
+        self._bind_window(window, title=target)
 
         if "uia" in include:
-            uia = self._walk_uia(window)
+            seen: set[str] = set()
+            for key, ref in self._elements.items():
+                if key.startswith("auto:") or key.startswith("name:"):
+                    continue
+                if ref.element_id in seen:
+                    continue
+                seen.add(ref.element_id)
+                uia.append(ref)
+            if not uia:
+                uia = self._walk_uia(window)
 
         if "app" in include:
             display = None
             for key in ("CalculatorResults", "CalculatorExpression"):
-                try:
-                    w = window.child_window(auto_id=key)
-                    if w.exists(timeout=0.5):
+                w = self._deep_find_auto_id(window, key, timeout_s=1.0)
+                if w is not None:
+                    try:
                         display = w.window_text()
                         break
-                except Exception:
-                    continue
+                    except Exception:
+                        continue
             title = ""
             try:
                 title = window.window_text() or ""
@@ -658,6 +780,33 @@ class WindowsBackend:
 
     def _invoke(self, element_id: str) -> ActionResult:
         wrapper = self._resolve_wrapper(element_id)
+        # Calculator clear fallback: Escape when neither clear button exists
+        if wrapper is None and element_id in ("auto:clearButton", "auto:clearEntryButton"):
+            try:
+                from pywinauto.keyboard import send_keys
+
+                if self._window is not None:
+                    try:
+                        self._window.set_focus()
+                    except Exception:
+                        pass
+                send_keys("{ESC}")
+                return ActionResult(
+                    ok=True,
+                    mode_used="windows",
+                    info={"fallback": "Escape", "wanted": element_id},
+                )
+            except Exception as exc:
+                return ActionResult(
+                    ok=False,
+                    mode_used="windows",
+                    error=StructuredError(
+                        code="element_not_found",
+                        message=(
+                            f"No clear control for {element_id!r} and Escape fallback failed: {exc}"
+                        ),
+                    ),
+                )
         if wrapper is None:
             return ActionResult(
                 ok=False,
@@ -667,7 +816,9 @@ class WindowsBackend:
                     message=(
                         f"No element for id={element_id!r} in "
                         f"target={self._target_title!r}. "
-                        "Is Calculator/browser focused and UIA ready?"
+                        "Win11 Calculator is UWP — controls are under the "
+                        "ApplicationFrameHost tree; deep UIA search failed. "
+                        "Is Calculator focused and UIA ready?"
                     ),
                     details={"element_id": element_id, "visible": self._visible_titles()},
                 ),
@@ -713,7 +864,52 @@ class WindowsBackend:
             ),
         )
 
+    def _read_value(self, wrapper: Any) -> str | None:
+        for getter in (
+            lambda w: w.get_value(),
+            lambda w: w.iface_value.CurrentValue,
+            lambda w: w.window_text(),
+            lambda w: getattr(w.element_info, "name", None),
+        ):
+            try:
+                val = getter(wrapper)
+                if val is not None:
+                    return str(val)
+            except Exception:
+                continue
+        return None
+
+    def _set_value(self, wrapper: Any, text: str) -> str:
+        """Set an Edit/value control; return method used."""
+        try:
+            wrapper.set_edit_text(text)
+            return "set_edit_text"
+        except Exception:
+            pass
+        try:
+            wrapper.iface_value.SetValue(text)
+            return "ValuePattern"
+        except Exception:
+            pass
+        try:
+            wrapper.set_focus()
+        except Exception:
+            pass
+        try:
+            # Select-all then type for stubborn edits
+            from pywinauto.keyboard import send_keys
+
+            wrapper.type_keys("^a{BACKSPACE}" + text, with_spaces=True)
+            return "type_keys"
+        except Exception:
+            from pywinauto.keyboard import send_keys
+
+            send_keys("^a{BACKSPACE}" + text, with_spaces=True)
+            return "send_keys"
+
     def _type(self, action: Type) -> ActionResult:
+        method = "send_keys"
+        verified: str | None = None
         if action.element_id:
             wrapper = self._resolve_wrapper(action.element_id)
             if wrapper is None:
@@ -729,12 +925,40 @@ class WindowsBackend:
                 wrapper.set_focus()
             except Exception:
                 pass
-            try:
-                wrapper.type_keys(action.text, with_spaces=True)
-            except Exception:
-                from pywinauto.keyboard import send_keys
+            method = self._set_value(wrapper, action.text)
+            # Cheap verify — fail closed if the field did not take the value
+            time.sleep(0.05)
+            verified = self._read_value(wrapper)
+            if verified is not None and action.text not in verified and verified != action.text:
+                # Some edits report name/aria instead of value; retry type_keys once
+                try:
+                    from pywinauto.keyboard import send_keys
 
-                send_keys(action.text, with_spaces=True)
+                    wrapper.set_focus()
+                    send_keys("^a{BACKSPACE}" + action.text, with_spaces=True)
+                    time.sleep(0.05)
+                    verified = self._read_value(wrapper)
+                    method = "type_keys_retry"
+                except Exception:
+                    pass
+            if verified is not None and action.text not in verified and verified.strip() != action.text:
+                return ActionResult(
+                    ok=False,
+                    mode_used="windows",
+                    error=StructuredError(
+                        code="type_verify_failed",
+                        message=(
+                            f"Typed {action.text!r} into {action.element_id!r} via {method}, "
+                            f"but field value is {verified!r}"
+                        ),
+                        details={
+                            "wanted": action.text,
+                            "got": verified,
+                            "element_id": action.element_id,
+                            "method": method,
+                        },
+                    ),
+                )
         else:
             from pywinauto.keyboard import send_keys
 
@@ -743,7 +967,11 @@ class WindowsBackend:
             from pywinauto.keyboard import send_keys
 
             send_keys("{ENTER}")
-        return ActionResult(ok=True, mode_used="windows")
+        return ActionResult(
+            ok=True,
+            mode_used="windows",
+            info={"method": method, "verified": verified, "text": action.text},
+        )
 
     def _key(self, keys: str) -> ActionResult:
         from pywinauto.keyboard import send_keys
@@ -818,8 +1046,28 @@ class WindowsBackend:
                     mode_used="windows",
                     error=StructuredError(code="focus_failed", message=str(exc)),
                 )
-            self._window = window
-            self._target_title = title
+            self._bind_window(window, title=title)
+            # For Calculator, ensure deep controls are reachable before returning
+            if match_window_title(title, "Calculator") or title.lower() == "calculator":
+                ready = self._wait_controls(
+                    window,
+                    ("num1Button", "clearButton", "clearEntryButton", "CalculatorResults"),
+                    timeout_s=min(self.control_timeout_s, 10.0),
+                )
+                if ready is None:
+                    return ActionResult(
+                        ok=False,
+                        mode_used="windows",
+                        error=StructuredError(
+                            code="uia_not_ready",
+                            message=(
+                                "Focused Calculator but deep UIA search found no "
+                                "num1Button/clearButton/CalculatorResults under the "
+                                "ApplicationFrameHost tree."
+                            ),
+                            details={"title": title, "visible": self._visible_titles()},
+                        ),
+                    )
             return ActionResult(ok=True, mode_used="windows")
 
         if name in ("open_url", "browser.open"):
@@ -828,6 +1076,8 @@ class WindowsBackend:
                 browser=str(args.get("browser") or "msedge"),
                 title=args.get("target") or args.get("title"),
                 timeout_s=float(args["timeout_s"]) if args.get("timeout_s") is not None else None,
+                new_window=bool(args.get("new_window", True)),
+                isolated_profile=bool(args.get("isolated_profile", True)),
             )
 
         if name in ("uia.invoke", "invoke_by"):
@@ -848,8 +1098,7 @@ class WindowsBackend:
             if args.get("target"):
                 win = self._find_window(str(args["target"]), timeout_s=self.control_timeout_s)
                 if win is not None:
-                    self._window = win
-                    self._target_title = str(args["target"])
+                    self._bind_window(win, title=str(args["target"]))
             return self._invoke(str(eid))
 
         if name in ("uia.type", "type_by"):
@@ -858,6 +1107,10 @@ class WindowsBackend:
                 eid = f"auto:{args['auto_id']}"
             if not eid and args.get("name"):
                 eid = f"name:{args['name']}"
+            if args.get("target"):
+                win = self._find_window(str(args["target"]), timeout_s=self.control_timeout_s)
+                if win is not None:
+                    self._bind_window(win, title=str(args["target"]))
             text = str(args.get("text") or "")
             return self._type(
                 Type(
@@ -927,9 +1180,10 @@ class WindowsBackend:
                 except Exception:
                     pass
                 if is_calculator_app(app):
+                    self._bind_window(existing, title=title)
                     ready = self._wait_controls(
                         existing,
-                        ("clearButton", "num1Button", "CalculatorResults"),
+                        ("num1Button", "clearButton", "clearEntryButton", "CalculatorResults"),
                         timeout_s=min(timeout, 15.0),
                     )
                     if ready is None:
@@ -938,6 +1192,7 @@ class WindowsBackend:
                     else:
                         return ActionResult(ok=True, mode_used="windows")
                 else:
+                    self._bind_window(existing, title=title)
                     return ActionResult(ok=True, mode_used="windows")
 
         attempts: list[str] = []
@@ -1025,8 +1280,7 @@ class WindowsBackend:
                 ),
             )
 
-        self._window = window
-        self._target_title = title
+        self._bind_window(window, title=title)
         try:
             window.set_focus()
         except Exception:
@@ -1035,8 +1289,8 @@ class WindowsBackend:
         if is_calculator_app(app):
             ready = self._wait_controls(
                 window,
-                ("clearButton", "num1Button", "equalButton"),
-                timeout_s=min(timeout, 20.0),
+                ("num1Button", "clearButton", "clearEntryButton", "equalButton", "CalculatorResults"),
+                timeout_s=min(timeout, 25.0),
             )
             if ready is None:
                 return ActionResult(
@@ -1045,9 +1299,10 @@ class WindowsBackend:
                     error=StructuredError(
                         code="uia_not_ready",
                         message=(
-                            f"Calculator window found but UIA controls not ready "
-                            f"within timeout (wanted clearButton/num1Button). "
-                            f"Title matched; visible={self._visible_titles()}"
+                            "Calculator window found but deep UIA search found no "
+                            "num1Button/clearButton/CalculatorResults under the "
+                            "ApplicationFrameHost tree within timeout. "
+                            f"Visible titles: {self._visible_titles()}"
                         ),
                         details={"title": title, "visible": self._visible_titles()},
                     ),
@@ -1061,6 +1316,9 @@ class WindowsBackend:
         browser: str = "msedge",
         title: str | None = None,
         timeout_s: float | None = None,
+        *,
+        new_window: bool = True,
+        isolated_profile: bool = True,
     ) -> ActionResult:
         if not url:
             return ActionResult(
@@ -1117,8 +1375,14 @@ class WindowsBackend:
         if alt not in order:
             order.append(alt)
 
+        profile_dir: str | None = None
+        if isolated_profile:
+            profile_dir = tempfile.mkdtemp(prefix="wincua-browser-")
+            self._temp_profile_dirs.append(profile_dir)
+
         tried: list[str] = []
         started: Path | None = None
+        launch_argv: list[str] = []
         for name in order:
             denied = self._check_process_allowed(name)
             if denied:
@@ -1128,9 +1392,25 @@ class WindowsBackend:
             if exe is None:
                 tried.append(f"{name}:not_found")
                 continue
+            argv = [str(exe)]
+            # Fresh window + throwaway profile avoids reused tabs / first-run infobars
+            # stealing keyboard focus from the form document.
+            if new_window:
+                argv.append("--new-window")
+            if profile_dir:
+                argv.append(f"--user-data-dir={profile_dir}")
+            argv.extend(
+                [
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-features=TranslateUI",
+                    url,
+                ]
+            )
             try:
-                self._popen([str(exe), url])
+                self._popen(argv)
                 started = exe
+                launch_argv = argv
                 tried.append(f"{exe}:ok")
                 break
             except Exception as exc:
@@ -1176,6 +1456,14 @@ class WindowsBackend:
             for hint in title_hints:
                 window = self._find_window_once(str(hint))
                 if window is not None:
+                    # Prefer a window that does NOT say "and N more page" (multi-tab reuse)
+                    try:
+                        t = window.window_text() or ""
+                    except Exception:
+                        t = ""
+                    if "more page" in t.lower() and profile_dir:
+                        window = None
+                        continue
                     matched_hint = hint
                     break
             if window is None:
@@ -1191,6 +1479,7 @@ class WindowsBackend:
                         f"Started {started.name} with {url!r} but no browser window "
                         f"matched titles {title_hints} within {timeout}s. "
                         f"Visible titles: {self._visible_titles()}. "
+                        f"Launch argv: {launch_argv}. "
                         "If the tab title differs, pass target= to open_url, or "
                         "increase WINCUA_LAUNCH_TIMEOUT_S."
                     ),
@@ -1200,14 +1489,22 @@ class WindowsBackend:
                         "hints": title_hints,
                         "visible": self._visible_titles(),
                         "tried": tried,
+                        "profile_dir": profile_dir,
                     },
                 ),
             )
 
-        self._window = window
-        self._target_title = str(matched_hint or title_hints[0])
+        self._bind_window(window, title=str(matched_hint or title_hints[0]))
         try:
             window.set_focus()
         except Exception:
             pass
-        return ActionResult(ok=True, mode_used="windows")
+        return ActionResult(
+            ok=True,
+            mode_used="windows",
+            info={
+                "browser": str(started),
+                "profile_dir": profile_dir,
+                "new_window": new_window,
+            },
+        )

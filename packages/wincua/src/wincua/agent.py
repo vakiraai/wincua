@@ -376,6 +376,7 @@ class Agent:
                             "name": args.get("name"),
                             "text": args.get("text", ""),
                             "submit": args.get("submit", False),
+                            "target": args.get("target"),
                         },
                     ),
                     dry_run=dry_run,
@@ -494,10 +495,14 @@ class Agent:
 
 
 def _tool_result(name: str, result: Any) -> dict[str, Any]:
-    return {
+    out: dict[str, Any] = {
         "kind": "tool",
         "name": name,
         "ok": result.ok,
         "mode_used": result.mode_used,
         "message": None if result.ok else (result.error.message if result.error else None),
     }
+    info = getattr(result, "info", None)
+    if info:
+        out["info"] = info
+    return out

@@ -43,6 +43,12 @@ class MockBackend:
                     name=f"Display is {self.display}",
                 ),
                 ElementRef(element_id="auto:clearButton", role="Button", name="Clear", patterns=("Invoke",)),
+                ElementRef(
+                    element_id="auto:clearEntryButton",
+                    role="Button",
+                    name="Clear entry",
+                    patterns=("Invoke",),
+                ),
                 ElementRef(element_id="auto:num1Button", role="Button", name="One", patterns=("Invoke",)),
                 ElementRef(element_id="auto:num7Button", role="Button", name="Seven", patterns=("Invoke",)),
                 ElementRef(element_id="auto:num2Button", role="Button", name="Two", patterns=("Invoke",)),
@@ -51,7 +57,17 @@ class MockBackend:
                 ElementRef(element_id="auto:equalButton", role="Button", name="Equals", patterns=("Invoke",)),
                 ElementRef(element_id="e2", role="Button", name="One", patterns=("Invoke",)),
                 ElementRef(element_id="e3", role="Button", name="Equals", patterns=("Invoke",)),
+                ElementRef(element_id="name:Full name", role="Edit", name="Full name"),
+                ElementRef(element_id="name:Email", role="Edit", name="Email"),
+                ElementRef(
+                    element_id="name:Submit form",
+                    role="Button",
+                    name="Submit form",
+                    patterns=("Invoke",),
+                ),
             ]
+            if self.display.startswith("OK:"):
+                uia.append(ElementRef(element_id="status", role="status", name=self.display))
         if "screenshot" in include:
             screenshot = ImageRef(path=None, data=b"", capture_quality="full")
         if "app" in include:
@@ -65,7 +81,7 @@ class MockBackend:
     def _apply_calc_button(self, auto_id: str | None) -> None:
         if not auto_id:
             return
-        if auto_id == "clearButton":
+        if auto_id in {"clearButton", "clearEntryButton"}:
             self._expr.clear()
             self.display = "0"
             return
@@ -112,6 +128,8 @@ class MockBackend:
                 return ActionResult(ok=True, mode_used=mode)
             if action.name in ("uia.invoke", "invoke_by"):
                 self._apply_calc_button(action.args.get("auto_id"))
+                if (action.args.get("name") or "") == "Submit form":
+                    self._finish_form_mock()
                 return ActionResult(ok=True, mode_used=mode)
             if action.name in ("uia.type", "type_by"):
                 text = str(action.args.get("text") or "")
@@ -120,7 +138,11 @@ class MockBackend:
                     self.display = " ".join(self._form_chunks)
                 if action.args.get("submit"):
                     self._finish_form_mock()
-                return ActionResult(ok=True, mode_used=mode)
+                return ActionResult(
+                    ok=True,
+                    mode_used=mode,
+                    info={"method": "mock", "verified": text, "text": text},
+                )
             return ActionResult(ok=True, mode_used=mode)
         if isinstance(action, Invoke):
             eid = action.element_id or ""
