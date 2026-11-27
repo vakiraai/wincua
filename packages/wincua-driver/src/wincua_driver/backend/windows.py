@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any, Sequence
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from wincua_driver.types import (
     Action,
@@ -26,7 +28,23 @@ from wincua_driver.types import (
     Type,
 )
 
-_CALC_TITLE_RE = re.compile(r"Calculator", re.I)
+# Win11 Store Calculator AUMID (stable across consumer installs)
+_CALC_AUMID = "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
+_DEFAULT_LAUNCH_TIMEOUT_S = 45.0
+_DEFAULT_CONTROL_TIMEOUT_S = 10.0
+
+_BROWSER_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "msedge.exe": (
+        r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
+        r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe",
+        r"%LocalAppData%\Microsoft\Edge\Application\msedge.exe",
+    ),
+    "chrome.exe": (
+        r"%ProgramFiles%\Google\Chrome\Application\chrome.exe",
+        r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
+        r"%LocalAppData%\Google\Chrome\Application\chrome.exe",
+    ),
+}
 
 
 def is_windows() -> bool:
@@ -45,12 +63,113 @@ def windows_unavailable_error(what: str = "WindowsBackend") -> StructuredError:
     )
 
 
+def match_window_title(title: str, target: str) -> bool:
+    """True if a window title matches a launch/focus target string."""
+    if not target:
+        return False
+    t = (title or "").strip()
+    want = target.strip()
+    if not t:
+        return False
+    if t == want:
+        return True
+    return want.lower() in t.lower()
+
+
+def expand_win_path(path: str) -> str:
+    return os.path.expandvars(os.path.expanduser(path))
+
+
+def resolve_browser_executable(browser: str) -> Path | None:
+    """Resolve Edge/Chrome to an absolute path (PATH + common install dirs)."""
+    name = {
+        "edge": "msedge.exe",
+        "msedge": "msedge.exe",
+        "chrome": "chrome.exe",
+        "msedge.exe": "msedge.exe",
+        "chrome.exe": "chrome.exe",
+    }.get(browser.lower(), browser)
+    if not name.lower().endswith(".exe"):
+        name = f"{name}.exe"
+
+    which = shutil.which(name)
+    if which:
+        return Path(which)
+
+    for candidate in _BROWSER_CANDIDATES.get(name.lower(), ()):
+        p = Path(expand_win_path(candidate))
+        if p.is_file():
+            return p
+    # Absolute path already?
+    direct = Path(expand_win_path(browser))
+    if direct.is_file():
+        return direct
+    return None
+
+
+def is_calculator_app(app: str) -> bool:
+    a = (app or "").strip().lower()
+    return a in {
+        "calc",
+        "calc.exe",
+        "calculator",
+        "calculator:",
+        "calculatorapp",
+        "calculatorapp.exe",
+        _CALC_AUMID.lower(),
+    }
+
+
+def calculator_launch_strategies() -> list[tuple[str, list[str] | None]]:
+    """Ordered Win11 Calculator start strategies.
+
+    Each entry is (label, argv_or_None). ``None`` argv means use ``os.startfile``.
+    Avoid ``Application.start('calc.exe')`` — calc.exe is a stub that exits after
+    launching the Store app, which makes pywinauto wait/timeout.
+    """
+    return [
+        ("protocol:calculator:", None),  # os.startfile("calculator:")
+        (
+            "cmd:start calculator:",
+            ["cmd.exe", "/c", "start", "", "calculator:"],
+        ),
+        (
+            "explorer:AppsFolder",
+            ["explorer.exe", f"shell:AppsFolder\\{_CALC_AUMID}"],
+        ),
+        ("calc.exe", ["calc.exe"]),
+    ]
+
+
+def file_uri_to_path(url: str) -> Path | None:
+    """Best-effort file:// → Path (for existence checks)."""
+    if not url.lower().startswith("file:"):
+        p = Path(url)
+        return p if p.exists() else None
+    parsed = urlparse(url)
+    path = unquote(parsed.path or "")
+    # file:///C:/foo → /C:/foo on posix parsers; strip leading slash on Windows drives
+    if re.match(r"^/[A-Za-z]:/", path):
+        path = path[1:]
+    elif path.startswith("/") and sys.platform == "win32":
+        # UNC or odd forms
+        pass
+    p = Path(path)
+    return p
+
+
 class WindowsBackend:
     """pywinauto/UIA backend. Instantiation fails clearly off Windows."""
 
     name = "windows"
 
-    def __init__(self, allow: Sequence[str] | None = None) -> None:
+    def __init__(
+        self,
+        allow: Sequence[str] | None = None,
+        *,
+        launch_timeout_s: float | None = None,
+        control_timeout_s: float | None = None,
+    ) -> None:
         if not is_windows():
             err = windows_unavailable_error()
             raise RuntimeError(err.message)
@@ -62,12 +181,34 @@ class WindowsBackend:
                 "Install with: pip install -e 'packages/wincua-driver[windows]'"
             ) from exc
 
+        env_launch = os.environ.get("WINCUA_LAUNCH_TIMEOUT_S")
+        env_control = os.environ.get("WINCUA_CONTROL_TIMEOUT_S")
+        self.launch_timeout_s = float(
+            launch_timeout_s
+            if launch_timeout_s is not None
+            else (env_launch or _DEFAULT_LAUNCH_TIMEOUT_S)
+        )
+        self.control_timeout_s = float(
+            control_timeout_s
+            if control_timeout_s is not None
+            else (env_control or _DEFAULT_CONTROL_TIMEOUT_S)
+        )
+
         self.allow: list[str] = [a.lower() for a in (allow or [])]
         self._elements: dict[str, ElementRef] = {}
         self._wrappers: dict[str, Any] = {}
         self._window: Any = None
         self._target_title: str | None = None
         self._id_seq = 0
+
+        # Soften pywinauto global timings so missing windows fail with our errors
+        try:
+            from pywinauto import timings
+
+            timings.Timings.window_find_timeout = min(5.0, self.control_timeout_s)
+            timings.Timings.exists_timeout = min(3.0, self.control_timeout_s)
+        except Exception:
+            pass
 
     def set_allow(self, allow: Sequence[str]) -> None:
         self.allow = [a.lower() for a in allow]
@@ -89,8 +230,19 @@ class WindowsBackend:
             )
         base = Path(exe_name).name.lower()
         allowed = {Path(a).name.lower() for a in self.allow}
-        # UWP Calculator often surfaces as ApplicationFrameHost.exe
         if base in allowed or exe_name.lower() in allowed:
+            return None
+        # Protocol / AUMID launches for Calculator
+        if is_calculator_app(exe_name) and any(
+            a in allowed
+            for a in (
+                "calc.exe",
+                "calculatorapp.exe",
+                "applicationframehost.exe",
+                "calculator:",
+                "calculator",
+            )
+        ):
             return None
         return StructuredError(
             code="allow_list_denied",
@@ -103,24 +255,100 @@ class WindowsBackend:
 
         return Desktop(backend="uia")
 
-    def _find_window(self, target: str) -> Any | None:
+    def _visible_titles(self, limit: int = 25) -> list[str]:
+        titles: list[str] = []
+        try:
+            for w in self._desktop().windows():
+                try:
+                    name = (w.window_text() or "").strip()
+                except Exception:
+                    try:
+                        name = (getattr(w.element_info, "name", None) or "").strip()
+                    except Exception:
+                        name = ""
+                if name:
+                    titles.append(name)
+                if len(titles) >= limit:
+                    break
+        except Exception as exc:
+            titles.append(f"<enumerate failed: {exc}>")
+        return titles
+
+    def _find_window_once(self, target: str) -> Any | None:
         desktop = self._desktop()
         if target in ("", "foreground", "desktop"):
             try:
-                return desktop.window(active_only=True)
-            except Exception:
-                wins = desktop.windows()
+                wins = [w for w in desktop.windows() if self._window_is_usable(w)]
                 return wins[0] if wins else None
+            except Exception:
+                return None
 
-        # Exact title, then regex
+        # Enumerate — more reliable than WindowSpecification that always "exists"
         try:
-            return desktop.window(title=target)
+            windows = desktop.windows()
+        except Exception:
+            windows = []
+
+        for w in windows:
+            try:
+                name = w.window_text() or ""
+            except Exception:
+                try:
+                    name = getattr(w.element_info, "name", "") or ""
+                except Exception:
+                    continue
+            if match_window_title(name, target) and self._window_is_usable(w):
+                return w
+        return None
+
+    def _window_is_usable(self, window: Any) -> bool:
+        try:
+            # Filter out invisible / zero-size shells when possible
+            if hasattr(window, "is_visible") and not window.is_visible():
+                return False
         except Exception:
             pass
-        try:
-            return desktop.window(title_re=f".*{re.escape(target)}.*")
-        except Exception:
+        return True
+
+    def _find_window(self, target: str, *, timeout_s: float = 0.0) -> Any | None:
+        deadline = time.time() + max(0.0, timeout_s)
+        while True:
+            found = self._find_window_once(target)
+            if found is not None:
+                return found
+            if time.time() >= deadline:
+                return None
+            time.sleep(0.25)
+
+    def _wait_controls(
+        self,
+        window: Any,
+        auto_ids: Sequence[str],
+        *,
+        timeout_s: float | None = None,
+    ) -> str | None:
+        """Wait until one of the AutomationIds is present; return the one found."""
+        timeout = self.control_timeout_s if timeout_s is None else timeout_s
+        deadline = time.time() + timeout
+        last_err = None
+        while time.time() < deadline:
+            for auto_id in auto_ids:
+                try:
+                    ctrl = window.child_window(auto_id=auto_id, control_type="Button")
+                    if ctrl.exists(timeout=0.2):
+                        return auto_id
+                except Exception as exc:
+                    last_err = exc
+                    try:
+                        ctrl = window.child_window(auto_id=auto_id)
+                        if ctrl.exists(timeout=0.2):
+                            return auto_id
+                    except Exception as exc2:
+                        last_err = exc2
+            time.sleep(0.2)
+        if last_err:
             return None
+        return None
 
     def _walk_uia(self, window: Any, limit: int = 120) -> list[ElementRef]:
         refs: list[ElementRef] = []
@@ -143,11 +371,6 @@ class WindowsBackend:
                     rect = None
                 patterns: list[str] = []
                 try:
-                    if wrapper.get_toggle_state:  # type: ignore[truthy-function]
-                        pass
-                except Exception:
-                    pass
-                try:
                     iface = getattr(wrapper, "iface_invoke", None)
                     if iface is not None:
                         patterns.append("Invoke")
@@ -162,7 +385,6 @@ class WindowsBackend:
                     bounds=rect,
                     patterns=tuple(patterns),
                 )
-                # stash auto_id in a stable secondary key
                 self._elements[eid] = ref
                 self._wrappers[eid] = wrapper
                 if auto_id:
@@ -189,37 +411,35 @@ class WindowsBackend:
         if not element_id:
             return None
         if element_id in self._wrappers:
-            return self._wrappers[element_id]
-        # live lookup by auto_id / name if window known
+            w = self._wrappers[element_id]
+            try:
+                if hasattr(w, "exists") and not w.exists(timeout=0.5):
+                    # Stale cache — fall through to live lookup
+                    pass
+                else:
+                    return w
+            except Exception:
+                return w
         if self._window is not None:
             if element_id.startswith("auto:"):
                 auto_id = element_id[5:]
                 try:
-                    return self._window.child_window(auto_id=auto_id)
+                    ctrl = self._window.child_window(auto_id=auto_id)
+                    if ctrl.exists(timeout=self.control_timeout_s):
+                        self._wrappers[element_id] = ctrl
+                        return ctrl
                 except Exception:
                     return None
             if element_id.startswith("name:"):
                 name = element_id[5:]
                 try:
-                    return self._window.child_window(title=name)
+                    ctrl = self._window.child_window(title=name)
+                    if ctrl.exists(timeout=self.control_timeout_s):
+                        self._wrappers[element_id] = ctrl
+                        return ctrl
                 except Exception:
                     return None
         return None
-
-    def _exe_for_window(self, window: Any) -> str:
-        try:
-            return str(window.element_info.process_id and "")
-        except Exception:
-            pass
-        try:
-            # Best-effort: process name via pywinauto
-            from pywinauto.process import process_from_pid
-
-            pid = window.process_id()
-            p = process_from_pid(pid)
-            return getattr(p, "name", lambda: "")() or ""
-        except Exception:
-            return ""
 
     async def observe(self, target: str, include: Sequence[str]) -> Observation:
         return await asyncio.to_thread(self._observe_sync, target, list(include))
@@ -230,13 +450,16 @@ class WindowsBackend:
         screenshot = None
         app: dict[str, Any] | None = None
 
-        window = self._find_window(target)
+        window = self._find_window(target, timeout_s=min(5.0, self.launch_timeout_s))
         if window is None:
             errors.append(
                 StructuredError(
                     code="window_not_found",
-                    message=f"No UIA window matched target={target!r}",
-                    details={"target": target},
+                    message=(
+                        f"No UIA window matched target={target!r}. "
+                        f"Visible titles: {self._visible_titles()}"
+                    ),
+                    details={"target": target, "visible": self._visible_titles()},
                 )
             )
             return Observation(errors=errors)
@@ -249,23 +472,22 @@ class WindowsBackend:
 
         if "app" in include:
             display = None
-            # Calculator display AutomationId (Win10/11 Store Calculator)
-            for key in ("auto:CalculatorResults", "auto:CalculatorExpression"):
-                w = self._wrappers.get(key)
-                if w is None and self._window is not None:
-                    try:
-                        w = self._window.child_window(auto_id=key.split(":", 1)[1])
-                    except Exception:
-                        w = None
-                if w is not None:
-                    try:
+            for key in ("CalculatorResults", "CalculatorExpression"):
+                try:
+                    w = window.child_window(auto_id=key)
+                    if w.exists(timeout=0.5):
                         display = w.window_text()
                         break
-                    except Exception:
-                        continue
+                except Exception:
+                    continue
+            title = ""
+            try:
+                title = window.window_text() or ""
+            except Exception:
+                pass
             app = {
                 "target": target,
-                "title": getattr(window.element_info, "name", "") or "",
+                "title": title,
                 "display": display,
             }
 
@@ -329,7 +551,12 @@ class WindowsBackend:
                 mode_used="windows",
                 error=StructuredError(
                     code="element_not_found",
-                    message=f"No element for id={element_id!r}",
+                    message=(
+                        f"No element for id={element_id!r} in "
+                        f"target={self._target_title!r}. "
+                        "Is Calculator/browser focused and UIA ready?"
+                    ),
+                    details={"element_id": element_id, "visible": self._visible_titles()},
                 ),
             )
         try:
@@ -408,9 +635,10 @@ class WindowsBackend:
     def _key(self, keys: str) -> ActionResult:
         from pywinauto.keyboard import send_keys
 
-        # Accept "ctrl+s" style → ^s ; leave {ENTER} etc. alone
         mapped = keys
-        if "+" in keys and not keys.startswith("{"):
+        if keys.upper() in {"F6"}:
+            mapped = "{F6}"
+        elif "+" in keys and not keys.startswith("{"):
             parts = [p.strip().lower() for p in keys.split("+")]
             mods = {"ctrl": "^", "alt": "%", "shift": "+"}
             prefix = "".join(mods[p] for p in parts[:-1] if p in mods)
@@ -421,8 +649,13 @@ class WindowsBackend:
                 "esc": "{ESC}",
                 "escape": "{ESC}",
                 "backspace": "{BACKSPACE}",
+                "f6": "{F6}",
             }
             mapped = prefix + special.get(last, last)
+        elif keys.lower() == "tab":
+            mapped = "{TAB}"
+        elif keys.lower() == "enter":
+            mapped = "{ENTER}"
         send_keys(mapped, with_spaces=True)
         return ActionResult(ok=True, mode_used="windows")
 
@@ -431,7 +664,11 @@ class WindowsBackend:
         args = action.args or {}
 
         if name in ("wait", "system.wait"):
-            time.sleep(float(args.get("seconds", args.get("ms", 0) / 1000 if "ms" in args else 1)))
+            if "ms" in args and "seconds" not in args:
+                seconds = float(args["ms"]) / 1000.0
+            else:
+                seconds = float(args.get("seconds", 1))
+            time.sleep(seconds)
             return ActionResult(ok=True, mode_used="windows")
 
         if name in ("launch", "app.launch"):
@@ -439,18 +676,25 @@ class WindowsBackend:
                 app=str(args.get("app") or args.get("exe") or ""),
                 title=args.get("title"),
                 args_list=args.get("args") or [],
+                timeout_s=float(args["timeout_s"]) if args.get("timeout_s") is not None else None,
             )
 
         if name in ("focus", "app.focus"):
             title = str(args.get("title") or args.get("target") or "")
-            window = self._find_window(title)
+            timeout_s = float(args.get("timeout_s", self.launch_timeout_s))
+            window = self._find_window(title, timeout_s=timeout_s)
             if window is None:
                 return ActionResult(
                     ok=False,
                     mode_used="windows",
                     error=StructuredError(
                         code="window_not_found",
-                        message=f"Cannot focus title={title!r}",
+                        message=(
+                            f"Cannot focus title={title!r} within {timeout_s}s. "
+                            f"Visible titles: {self._visible_titles()}. "
+                            "If the app is open under a localized name, pass that title."
+                        ),
+                        details={"title": title, "visible": self._visible_titles()},
                     ),
                 )
             try:
@@ -462,12 +706,15 @@ class WindowsBackend:
                     error=StructuredError(code="focus_failed", message=str(exc)),
                 )
             self._window = window
+            self._target_title = title
             return ActionResult(ok=True, mode_used="windows")
 
         if name in ("open_url", "browser.open"):
             return self._open_url(
                 url=str(args.get("url") or ""),
                 browser=str(args.get("browser") or "msedge"),
+                title=args.get("target") or args.get("title"),
+                timeout_s=float(args["timeout_s"]) if args.get("timeout_s") is not None else None,
             )
 
         if name in ("uia.invoke", "invoke_by"):
@@ -485,9 +732,11 @@ class WindowsBackend:
                         message="uia.invoke needs element_id, auto_id, or name",
                     ),
                 )
-            # Ensure window context for auto/name lookup
-            if self._window is None and args.get("target"):
-                self._window = self._find_window(str(args["target"]))
+            if args.get("target"):
+                win = self._find_window(str(args["target"]), timeout_s=self.control_timeout_s)
+                if win is not None:
+                    self._window = win
+                    self._target_title = str(args["target"])
             return self._invoke(str(eid))
 
         if name in ("uia.type", "type_by"):
@@ -514,11 +763,32 @@ class WindowsBackend:
             ),
         )
 
+    def _shell_start(self, target: str) -> None:
+        """Start via ShellExecute / startfile (does not wait on a stub process)."""
+        if hasattr(os, "startfile"):
+            os.startfile(target)  # type: ignore[attr-defined]
+            return
+        subprocess.Popen(
+            ["cmd.exe", "/c", "start", "", target],
+            shell=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def _popen(self, argv: list[str]) -> subprocess.Popen[Any]:
+        return subprocess.Popen(
+            argv,
+            shell=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
     def _launch(
         self,
         app: str,
         title: str | None = None,
         args_list: list[str] | None = None,
+        timeout_s: float | None = None,
     ) -> ActionResult:
         if not app:
             return ActionResult(
@@ -526,114 +796,305 @@ class WindowsBackend:
                 mode_used="windows",
                 error=StructuredError(code="invalid_args", message="launch requires app"),
             )
+        timeout = self.launch_timeout_s if timeout_s is None else timeout_s
+        title = title or ("Calculator" if is_calculator_app(app) else None)
+
         denied = self._check_process_allowed(app)
-        # calc.exe launches CalculatorApp / ApplicationFrameHost — allow either
-        if denied and app.lower() in ("calc.exe", "calc"):
-            if any(
-                Path(a).name.lower()
-                in {"calculatorapp.exe", "applicationframehost.exe", "calc.exe"}
-                for a in self.allow
-            ):
-                denied = None
         if denied:
             return ActionResult(ok=False, mode_used="windows", error=denied)
 
-        cmd = [app, *(args_list or [])]
-        try:
-            from pywinauto import Application
-
-            Application(backend="uia").start(" ".join(f'"{c}"' if " " in c else c for c in cmd))
-        except Exception:
-            subprocess.Popen(cmd, shell=False)
-
+        # Already running? Just focus.
         if title:
-            deadline = time.time() + 15
-            window = None
-            while time.time() < deadline:
-                window = self._find_window(title)
-                if window is not None:
+            existing = self._find_window(title, timeout_s=0.5)
+            if existing is not None:
+                self._window = existing
+                self._target_title = title
+                try:
+                    existing.set_focus()
+                except Exception:
+                    pass
+                if is_calculator_app(app):
+                    ready = self._wait_controls(
+                        existing,
+                        ("clearButton", "num1Button", "CalculatorResults"),
+                        timeout_s=min(timeout, 15.0),
+                    )
+                    if ready is None:
+                        # Window present but not ready — fall through and relaunch
+                        pass
+                    else:
+                        return ActionResult(ok=True, mode_used="windows")
+                else:
+                    return ActionResult(ok=True, mode_used="windows")
+
+        attempts: list[str] = []
+        last_exc: Exception | None = None
+
+        if is_calculator_app(app):
+            for label, argv in calculator_launch_strategies():
+                try:
+                    if argv is None:
+                        self._shell_start("calculator:")
+                    else:
+                        self._popen(argv)
+                    attempts.append(f"{label}:ok")
                     break
-                time.sleep(0.3)
-            if window is None:
+                except Exception as exc:
+                    attempts.append(f"{label}:{exc}")
+                    last_exc = exc
+            else:
                 return ActionResult(
                     ok=False,
                     mode_used="windows",
                     error=StructuredError(
-                        code="launch_timeout",
-                        message=f"Launched {app!r} but window {title!r} not found",
+                        code="launch_failed",
+                        message=(
+                            "Could not start Windows Calculator. Tried: "
+                            + "; ".join(attempts)
+                            + ". Open Calculator once from the Start menu, then re-run."
+                        ),
+                        details={"attempts": attempts, "error": str(last_exc)},
                     ),
                 )
-            self._window = window
+        else:
+            cmd = [app, *(args_list or [])]
             try:
-                window.set_focus()
-            except Exception:
-                pass
+                self._popen(cmd)
+                attempts.append(f"popen:{app}:ok")
+            except FileNotFoundError as exc:
+                # Fall back to shell start for PATH-less apps
+                try:
+                    self._shell_start(app)
+                    attempts.append(f"startfile:{app}:ok")
+                except Exception as exc2:
+                    return ActionResult(
+                        ok=False,
+                        mode_used="windows",
+                        error=StructuredError(
+                            code="launch_failed",
+                            message=(
+                                f"Could not start {app!r}: {exc}; startfile also failed: {exc2}"
+                            ),
+                        ),
+                    )
+            except Exception as exc:
+                return ActionResult(
+                    ok=False,
+                    mode_used="windows",
+                    error=StructuredError(code="launch_failed", message=str(exc)),
+                )
+
+        if not title:
+            return ActionResult(ok=True, mode_used="windows")
+
+        window = self._find_window(title, timeout_s=timeout)
+        if window is None:
+            return ActionResult(
+                ok=False,
+                mode_used="windows",
+                error=StructuredError(
+                    code="launch_timeout",
+                    message=(
+                        f"Started {app!r} but no window matching title={title!r} "
+                        f"appeared within {timeout}s. "
+                        f"Visible titles: {self._visible_titles()}. "
+                        f"Launch attempts: {attempts}. "
+                        "Tips: run on an interactive desktop (not a service session); "
+                        "open Calculator manually once; set WINCUA_LAUNCH_TIMEOUT_S=60."
+                    ),
+                    details={
+                        "app": app,
+                        "title": title,
+                        "timeout_s": timeout,
+                        "attempts": attempts,
+                        "visible": self._visible_titles(),
+                    },
+                ),
+            )
+
+        self._window = window
+        self._target_title = title
+        try:
+            window.set_focus()
+        except Exception:
+            pass
+
+        if is_calculator_app(app):
+            ready = self._wait_controls(
+                window,
+                ("clearButton", "num1Button", "equalButton"),
+                timeout_s=min(timeout, 20.0),
+            )
+            if ready is None:
+                return ActionResult(
+                    ok=False,
+                    mode_used="windows",
+                    error=StructuredError(
+                        code="uia_not_ready",
+                        message=(
+                            f"Calculator window found but UIA controls not ready "
+                            f"within timeout (wanted clearButton/num1Button). "
+                            f"Title matched; visible={self._visible_titles()}"
+                        ),
+                        details={"title": title, "visible": self._visible_titles()},
+                    ),
+                )
+
         return ActionResult(ok=True, mode_used="windows")
 
-    def _open_url(self, url: str, browser: str = "msedge") -> ActionResult:
+    def _open_url(
+        self,
+        url: str,
+        browser: str = "msedge",
+        title: str | None = None,
+        timeout_s: float | None = None,
+    ) -> ActionResult:
         if not url:
             return ActionResult(
                 ok=False,
                 mode_used="windows",
                 error=StructuredError(code="invalid_args", message="open_url requires url"),
             )
-        # Normalize file paths to file://
+        timeout = self.launch_timeout_s if timeout_s is None else timeout_s
+
+        # Normalize file paths to file:// and verify fixture exists
         if re.match(r"^[A-Za-z]:\\", url) or url.startswith("\\\\"):
-            url = Path(url).resolve().as_uri()
-        elif url.startswith("file:") is False and "://" not in url:
+            path = Path(url)
+            if not path.is_file():
+                return ActionResult(
+                    ok=False,
+                    mode_used="windows",
+                    error=StructuredError(
+                        code="fixture_missing",
+                        message=f"Form fixture not found: {path}",
+                    ),
+                )
+            url = path.resolve().as_uri()
+        elif not url.startswith("file:") and "://" not in url:
             path = Path(url)
             if path.exists():
                 url = path.resolve().as_uri()
+        elif url.startswith("file:"):
+            path = file_uri_to_path(url)
+            if path is not None and not path.is_file():
+                return ActionResult(
+                    ok=False,
+                    mode_used="windows",
+                    error=StructuredError(
+                        code="fixture_missing",
+                        message=(
+                            f"file:// fixture does not exist on disk: {path}. "
+                            "Run demos from the repo checkout so "
+                            "examples/fixtures/form.html is present."
+                        ),
+                        details={"url": url, "path": str(path)},
+                    ),
+                )
 
-        browser_exe = {
+        preferred = {
             "edge": "msedge.exe",
             "msedge": "msedge.exe",
             "chrome": "chrome.exe",
             "msedge.exe": "msedge.exe",
             "chrome.exe": "chrome.exe",
         }.get(browser.lower(), browser)
-        denied = self._check_process_allowed(browser_exe)
-        if denied:
-            return ActionResult(ok=False, mode_used="windows", error=denied)
 
-        # Prefer shell-open via known browser for file://
-        try:
-            subprocess.Popen([browser_exe, url], shell=False)
-        except FileNotFoundError:
-            # Fall back to the other browser
-            alt = "chrome.exe" if "edge" in browser_exe else "msedge.exe"
-            denied_alt = self._check_process_allowed(alt)
-            if denied_alt:
-                return ActionResult(
-                    ok=False,
-                    mode_used="windows",
-                    error=StructuredError(
-                        code="browser_not_found",
-                        message=f"Could not start {browser_exe}; alt also denied/missing",
-                        details={"url": url},
+        order = [preferred]
+        alt = "chrome.exe" if "edge" in preferred.lower() else "msedge.exe"
+        if alt not in order:
+            order.append(alt)
+
+        tried: list[str] = []
+        started: Path | None = None
+        for name in order:
+            denied = self._check_process_allowed(name)
+            if denied:
+                tried.append(f"{name}:allow_denied")
+                continue
+            exe = resolve_browser_executable(name)
+            if exe is None:
+                tried.append(f"{name}:not_found")
+                continue
+            try:
+                self._popen([str(exe), url])
+                started = exe
+                tried.append(f"{exe}:ok")
+                break
+            except Exception as exc:
+                tried.append(f"{exe}:{exc}")
+
+        if started is None:
+            searched = []
+            for name in order:
+                searched.extend(_BROWSER_CANDIDATES.get(name.lower(), ()))
+            return ActionResult(
+                ok=False,
+                mode_used="windows",
+                error=StructuredError(
+                    code="browser_not_found",
+                    message=(
+                        "Could not start Edge or Chrome to open the form fixture. "
+                        f"Tried: {tried}. "
+                        "Install Microsoft Edge (or Google Chrome), ensure "
+                        "msedge.exe/chrome.exe exists under Program Files, "
+                        "or pass --browser chrome. "
+                        f"Searched paths like: {[expand_win_path(p) for p in searched[:4]]}"
                     ),
-                )
-            try:
-                subprocess.Popen([alt, url], shell=False)
-                browser_exe = alt
-            except FileNotFoundError as exc:
-                return ActionResult(
-                    ok=False,
-                    mode_used="windows",
-                    error=StructuredError(code="browser_not_found", message=str(exc)),
-                )
+                    details={"tried": tried, "url": url},
+                ),
+            )
 
-        # Focus browser window (best-effort)
-        host = urlparse(url).path
-        time.sleep(1.0)
-        title_hint = "form" if "form" in url.lower() else Path(host).name
-        window = self._find_window(title_hint) or self._find_window(
-            "Edge" if "edge" in browser_exe else "Chrome"
-        )
-        if window is not None:
-            self._window = window
-            try:
-                window.set_focus()
-            except Exception:
-                pass
+        title_hints = [
+            t
+            for t in (
+                title,
+                "wincua form demo",
+                "form.html",
+                "form demo",
+                "Edge" if "edge" in started.name.lower() else "Chrome",
+            )
+            if t
+        ]
+
+        window = None
+        matched_hint = None
+        deadline = time.time() + timeout
+        while time.time() < deadline and window is None:
+            for hint in title_hints:
+                window = self._find_window_once(str(hint))
+                if window is not None:
+                    matched_hint = hint
+                    break
+            if window is None:
+                time.sleep(0.35)
+
+        if window is None:
+            return ActionResult(
+                ok=False,
+                mode_used="windows",
+                error=StructuredError(
+                    code="launch_timeout",
+                    message=(
+                        f"Started {started.name} with {url!r} but no browser window "
+                        f"matched titles {title_hints} within {timeout}s. "
+                        f"Visible titles: {self._visible_titles()}. "
+                        "If the tab title differs, pass target= to open_url, or "
+                        "increase WINCUA_LAUNCH_TIMEOUT_S."
+                    ),
+                    details={
+                        "browser": str(started),
+                        "url": url,
+                        "hints": title_hints,
+                        "visible": self._visible_titles(),
+                        "tried": tried,
+                    },
+                ),
+            )
+
+        self._window = window
+        self._target_title = str(matched_hint or title_hints[0])
+        try:
+            window.set_focus()
+        except Exception:
+            pass
         return ActionResult(ok=True, mode_used="windows")

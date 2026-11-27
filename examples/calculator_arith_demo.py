@@ -50,13 +50,18 @@ def build_calculator_steps():
         PlanStep(
             kind="tool",
             name="launch",
-            args={"app": "calc.exe", "title": "Calculator"},
+            args={
+                # Uses calculator: protocol / AppsFolder — not Application.start(calc.exe)
+                "app": "calculator",
+                "title": "Calculator",
+                "timeout_s": 45,
+            },
         ),
-        PlanStep(kind="tool", name="wait", args={"seconds": 1.2}),
+        PlanStep(kind="tool", name="wait", args={"seconds": 0.5}),
         PlanStep(
             kind="tool",
             name="focus",
-            args={"title": "Calculator"},
+            args={"title": "Calculator", "timeout_s": 15},
         ),
         PlanStep(kind="tool", name="wait", args={"seconds": 0.3}),
     ]
@@ -87,6 +92,12 @@ async def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Run scripted loop against MockBackend (no desktop; any OS)",
     )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="Override launch wait seconds (also: env WINCUA_LAUNCH_TIMEOUT_S)",
+    )
     args = parser.parse_args(argv)
 
     from wincua import Agent
@@ -106,15 +117,30 @@ async def main(argv: list[str] | None = None) -> int:
         return 1
     else:
         backend = "windows"
+        if args.timeout is not None:
+            import os
+
+            os.environ["WINCUA_LAUNCH_TIMEOUT_S"] = str(args.timeout)
+
+    steps = build_calculator_steps()
+    if args.timeout is not None:
+        steps[0].args["timeout_s"] = args.timeout
 
     agent = Agent(
         task=(
             f"Open Calculator and compute {EXPRESSION}; "
             f"leave the result visible (golden={GOLDEN})."
         ),
-        provider=ScriptedProvider(build_calculator_steps()),
+        provider=ScriptedProvider(steps),
         hitl=None,  # scripted — no LLM / HITL required
-        allow=["CalculatorApp.exe", "ApplicationFrameHost.exe", "calc.exe"],
+        allow=[
+            "CalculatorApp.exe",
+            "ApplicationFrameHost.exe",
+            "calc.exe",
+            "calculator",
+            "calculator:",
+            "explorer.exe",  # shell:AppsFolder launch helper
+        ],
         mode="foreground",
         recorder=True,
         backend=backend,

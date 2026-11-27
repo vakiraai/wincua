@@ -58,13 +58,14 @@ def build_browser_steps(fixture_uri: str):
                 "url": fixture_uri,
                 "browser": "msedge",
                 "target": "wincua form demo",
+                "timeout_s": 45,
             },
         ),
-        PlanStep(kind="tool", name="wait", args={"seconds": 2.0}),
+        PlanStep(kind="tool", name="wait", args={"seconds": 1.0}),
         PlanStep(
             kind="tool",
             name="focus",
-            args={"title": "wincua form demo"},
+            args={"title": "wincua form demo", "timeout_s": 20},
         ),
         PlanStep(kind="tool", name="wait", args={"seconds": 0.4}),
         # Move focus into the page document, then to the first field.
@@ -105,22 +106,32 @@ async def main(argv: list[str] | None = None) -> int:
         choices=("msedge", "chrome"),
         help="Browser executable preference on Windows (default: msedge)",
     )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="Override launch wait seconds (also: env WINCUA_LAUNCH_TIMEOUT_S)",
+    )
     args = parser.parse_args(argv)
 
     from wincua import Agent
     from wincua_driver import is_windows
     from wincua_driver.backend import set_backend
+    from wincua_driver.backend.windows import resolve_browser_executable
     from wincua_providers import ScriptedProvider
 
     if not FIXTURE.is_file():
         print(f"Missing fixture: {FIXTURE}", file=sys.stderr)
+        print("Run from the repo checkout so examples/fixtures/form.html exists.", file=sys.stderr)
         return 1
 
-    fixture_uri = FIXTURE.resolve().as_uri()
+    fixture_path = FIXTURE.resolve()
+    fixture_uri = fixture_path.as_uri()
 
     if args.mock:
         set_backend("mock")
         backend = "mock"
+        resolved_browser = None
     elif not is_windows():
         print(
             "HOST-WINDOWS-ONLY: browser_form_demo needs Win11 (or pass --mock). "
@@ -130,11 +141,28 @@ async def main(argv: list[str] | None = None) -> int:
         return 1
     else:
         backend = "windows"
+        if args.timeout is not None:
+            import os
+
+            os.environ["WINCUA_LAUNCH_TIMEOUT_S"] = str(args.timeout)
+        resolved_browser = resolve_browser_executable(args.browser)
+        if resolved_browser is None:
+            alt = "chrome" if args.browser == "msedge" else "msedge"
+            resolved_browser = resolve_browser_executable(alt)
+        if resolved_browser is None:
+            print(
+                "BROWSER NOT FOUND: install Microsoft Edge or Google Chrome, "
+                "or ensure msedge.exe / chrome.exe is under Program Files. "
+                f"Preference was --browser {args.browser}.",
+                file=sys.stderr,
+            )
+            return 1
 
     steps = build_browser_steps(fixture_uri)
     if not args.mock:
-        # Patch browser preference into the open_url step
         steps[0].args["browser"] = args.browser
+        if args.timeout is not None:
+            steps[0].args["timeout_s"] = args.timeout
 
     agent = Agent(
         task=(
@@ -151,8 +179,11 @@ async def main(argv: list[str] | None = None) -> int:
     )
 
     print("browser_form_demo")
-    print(f"  fixture: {fixture_uri}")
+    print(f"  fixture: {fixture_path}")
+    print(f"  fixture_uri: {fixture_uri}")
     print(f"  backend: {backend}")
+    if resolved_browser is not None:
+        print(f"  browser_exe: {resolved_browser}")
     print(f"  allow: {list(agent.allow)}")
     print(f"  provider: {agent.provider.name}")
     print("  note: Chromium UIA is best-effort; keyboard Tab/type is the reliable path.")

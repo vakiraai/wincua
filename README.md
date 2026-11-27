@@ -58,19 +58,36 @@ editable installs of workspace members, or `pip install -e "packages/wincua[wind
 
 ## Run demos (Win11 interactive desktop)
 
-Use a **normal logged-on desktop** (not a headless service session). Calculator
-and Edge/Chrome must be allow-listed (demos set this for you).
+Use a **normal logged-on desktop** (not a headless / service / SSH-only session).
+Open Calculator once from Start if it has never been launched on this account.
 
 ```powershell
 cd path\to\wincua
 
-# Calculator: launch, clear, 17+25=, read display, assert 42
+python -m pip install -e "packages/wincua-driver[windows]"
+python -m pip install -e packages/wincua-providers packages/wincua-hitl
+python -m pip install -e "packages/wincua[windows]"
+
+# Calculator: calculator: protocol / AppsFolder launch → 17+25= → assert 42
 python examples/calculator_arith_demo.py
 
-# Browser: open local file:// form, Tab/type fill + submit
+# Browser: resolves Edge/Chrome under Program Files, opens local form fixture
 python examples/browser_form_demo.py
 python examples/browser_form_demo.py --browser chrome
+
+# Optional: longer wait if the machine is slow
+python examples/calculator_arith_demo.py --timeout 60
+$env:WINCUA_LAUNCH_TIMEOUT_S = "60"
 ```
+
+### Launch troubleshooting
+
+| Symptom | Likely cause | What we do / what you can try |
+| --- | --- | --- |
+| Timeout, app never appears | `Application.start("calc.exe")` waits on a stub that exits | Driver uses `calculator:` / `shell:AppsFolder\…Calculator…` instead |
+| Timeout, wrong window | Title match too strict / lazy UIA spec | Enumerate top-level titles; errors list **visible titles** |
+| Browser fails immediately | `msedge.exe` not on `PATH` | Resolve under `Program Files\Microsoft\Edge\…`; actionable missing-binary error |
+| `file://` missing | Running outside the repo | Demo checks `examples/fixtures/form.html` and prints the absolute path |
 
 ### Without a Windows desktop (CI / Linux / macOS)
 
