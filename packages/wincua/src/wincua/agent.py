@@ -6,6 +6,13 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
 
+from wincua.guard import (
+    LoopGuard,
+    action_signature,
+    normalize_model_args,
+    observation_fingerprint,
+    short_error,
+)
 from wincua.session import Session
 
 
@@ -154,6 +161,7 @@ class Agent:
         last_obs: Any = None
         target = self.observe_target
         error_streak = 0
+        guard = LoopGuard()
 
         for turn in range(self.max_turns):
             obs = await observe(target=target, include=["uia", "app", "screenshot"])
@@ -196,6 +204,11 @@ class Agent:
                 error_streak += 1
                 if error_streak < self.max_consecutive_errors:
                     continue
+                reason = f"model returned no tool call {error_streak} times in a row"
+                if self._escalate(reason, turn, steps, history):
+                    error_streak = 0
+                    guard.reset()
+                    continue
                 recording = await session.end()
                 return AgentResult(
                     ok=False,
@@ -231,6 +244,8 @@ class Agent:
             finished = False
             ok = True
             message: str | None = None
+            turn_sigs: list[str] = []
+            stuck: str | None = None
 
             for pstep in plan.steps:
                 assert isinstance(pstep, PlanStep)
@@ -273,6 +288,9 @@ class Agent:
                 # tool (or bare name treated as tool)
                 tool_name = pstep.name or pstep.kind
                 args = dict(pstep.args or {})
+                if recovers:
+                    args = normalize_model_args(tool_name, args, last_obs, current_target=target)
+                    entry["args"] = args
                 result_record = await self._dispatch_tool(
                     tool_name=tool_name,
                     args=args,
@@ -287,15 +305,22 @@ class Agent:
                     last_obs=last_obs,
                 )
                 steps.append(result_record)
+                if result_record.get("detail") and self.recorder:
+                    result_record["detail_log"] = _write_detail(
+                        session.session_id, turn, tool_name, result_record.pop("detail")
+                    )
                 entry["result"] = {
                     k: result_record[k]
                     for k in ("ok", "message", "display", "info")
                     if result_record.get(k) is not None
                 }
-                if result_record.get("ok") is False and recovers:
-                    # LLM planners see the failure in history and re-plan.
-                    error_streak += 1
-                    if error_streak < self.max_consecutive_errors:
+                if recovers:
+                    # LLM planners see failures in history and re-plan; the guard
+                    # hands over to the next provider when they go in circles.
+                    sig = action_signature(tool_name, args)
+                    turn_sigs.append(sig)
+                    stuck = guard.record_action(sig, result_record.get("ok") is not False)
+                    if result_record.get("ok") is False:
                         break
                 if result_record.get("ok") is False:
                     finished = True
@@ -313,6 +338,15 @@ class Agent:
                 elif tool_name == "open_url":
                     target = str(args.get("target") or target)
 
+            if not finished and recovers:
+                stuck = stuck or guard.end_turn(observation_fingerprint(last_obs), turn_sigs)
+                if stuck:
+                    if self._escalate(stuck, turn, steps, history):
+                        error_streak = 0
+                        guard.reset()
+                    else:
+                        finished, ok, message = True, False, f"stopped: {stuck}"
+
             if finished:
                 recording = await session.end()
                 return AgentResult(
@@ -329,6 +363,18 @@ class Agent:
             recording_path=recording,
             message=f"max_turns ({self.max_turns}) exceeded",
         )
+
+    def _escalate(
+        self, reason: str, turn: int, steps: list[dict[str, Any]], history: list[dict[str, Any]]
+    ) -> bool:
+        """Hand planning to the next provider in the fallback chain (ends in null = human)."""
+        escalate = getattr(self.provider, "escalate", None)
+        handed_over = bool(escalate and escalate(reason))
+        steps.append(
+            {"kind": "escalate", "turn": turn, "reason": reason, "to": self.provider_name if handed_over else None}
+        )
+        history.append({"kind": "escalation", "turn": turn, "text": f"Previous planner stopped: {reason}"})
+        return handed_over
 
     async def _ask_human(self, *, question: str, risk: str = "info") -> str | None:
         if self.hitl is None:
@@ -369,52 +415,28 @@ class Agent:
                 semantic_cls(name="wait", args=args),
                 dry_run=dry_run,
             )
-            return {
-                "kind": "tool",
-                "name": "wait",
-                "ok": result.ok,
-                "mode_used": result.mode_used,
-                "message": None if result.ok else (result.error.message if result.error else None),
-            }
+            return _tool_result("wait", result)
 
         if name in ("launch", "app.launch"):
             result = await act_fn(
                 semantic_cls(name="launch", args=args),
                 dry_run=dry_run,
             )
-            return {
-                "kind": "tool",
-                "name": "launch",
-                "ok": result.ok,
-                "mode_used": result.mode_used,
-                "message": None if result.ok else (result.error.message if result.error else None),
-            }
+            return _tool_result("launch", result)
 
         if name in ("focus", "app.focus"):
             result = await act_fn(
                 semantic_cls(name="focus", args=args),
                 dry_run=dry_run,
             )
-            return {
-                "kind": "tool",
-                "name": "focus",
-                "ok": result.ok,
-                "mode_used": result.mode_used,
-                "message": None if result.ok else (result.error.message if result.error else None),
-            }
+            return _tool_result("focus", result)
 
         if name in ("open_url", "browser.open"):
             result = await act_fn(
                 semantic_cls(name="open_url", args=args),
                 dry_run=dry_run,
             )
-            return {
-                "kind": "tool",
-                "name": "open_url",
-                "ok": result.ok,
-                "mode_used": result.mode_used,
-                "message": None if result.ok else (result.error.message if result.error else None),
-            }
+            return _tool_result("open_url", result)
 
         if name in ("click",):
             result = await act_fn(
@@ -567,14 +589,32 @@ class Agent:
         }
 
 
+def _write_detail(session_id: str | None, turn: int, tool: str, text: str) -> str | None:
+    """Append a full driver error (e.g. UIA tree dump) to recordings/<session>-errors.log."""
+    from pathlib import Path
+
+    path = Path("recordings") / f"{session_id or 'session'}-errors.log"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(f"--- turn {turn} {tool}\n{text}\n")
+    except OSError:
+        return None
+    return str(path)
+
+
 def _tool_result(name: str, result: Any) -> dict[str, Any]:
+    full = None if result.ok else (result.error.message if result.error else None)
     out: dict[str, Any] = {
         "kind": "tool",
         "name": name,
         "ok": result.ok,
         "mode_used": result.mode_used,
-        "message": None if result.ok else (result.error.message if result.error else None),
+        # Short text for models and logs; the full driver message (UIA dumps…) stays in "detail".
+        "message": short_error(full),
     }
+    if full and full != out["message"]:
+        out["detail"] = full
     info = getattr(result, "info", None)
     if info:
         out["info"] = info

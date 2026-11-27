@@ -13,9 +13,9 @@ from typing import Any
 
 from wincua_providers.base import PlanStep
 
-_TARGET = {
+_ELEMENT_ID = {
     "type": "string",
-    "description": "Window title to act in (optional; defaults to the observed window).",
+    "description": "Id from the Elements list, copied exactly (e.g. auto:clearButton)",
 }
 
 TOOL_SPECS: list[dict[str, Any]] = [
@@ -59,44 +59,35 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "invoke",
         "description": (
-            "Press a UI element (button, menu item) via UI Automation. Give element_id "
-            "from the observation, or auto_id (AutomationId), or name."
+            "Press a button or menu item. element_id is an id from the Elements list, "
+            "e.g. auto:num7Button or name:Clear entry."
         ),
         "parameters": {
             "type": "object",
-            "properties": {
-                "element_id": {"type": "string"},
-                "auto_id": {"type": "string"},
-                "name": {"type": "string"},
-                "target": _TARGET,
-            },
+            "properties": {"element_id": _ELEMENT_ID},
+            "required": ["element_id"],
         },
     },
     {
         "name": "type",
-        "description": (
-            "Type text into an edit field (element_id / auto_id / name) or the focused element."
-        ),
+        "description": "Type text into the element_id field (or the focused element if omitted).",
         "parameters": {
             "type": "object",
             "properties": {
                 "text": {"type": "string"},
-                "element_id": {"type": "string"},
-                "auto_id": {"type": "string"},
-                "name": {"type": "string"},
+                "element_id": _ELEMENT_ID,
                 "submit": {"type": "boolean", "description": "Press Enter afterwards"},
-                "target": _TARGET,
             },
             "required": ["text"],
         },
     },
     {
         "name": "click",
-        "description": "Click an element by element_id (preferred) or screen coordinates x, y.",
+        "description": "Click an element (element_id) or, only if it has no id, screen coordinates x, y.",
         "parameters": {
             "type": "object",
             "properties": {
-                "element_id": {"type": "string"},
+                "element_id": _ELEMENT_ID,
                 "x": {"type": "integer"},
                 "y": {"type": "integer"},
             },

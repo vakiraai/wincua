@@ -83,7 +83,9 @@ def test_text_only_replies_get_a_nudge_then_give_up():
     cfg = parse_config({"provider": {"default": "ollama"}})
     agent = _calc_agent(cfg.build_provider(transport=t), max_consecutive_errors=3)
     result = asyncio.run(agent.run())
-    assert not result.ok and "no tool call 3 times" in result.message
+    escalations = [s for s in result.steps if s["kind"] == "escalate"]
+    assert "no tool call 3 times" in escalations[0]["reason"] and escalations[0]["to"] == "null"
+    assert not result.ok and "HITL" in result.message
     assert "Reply with a tool call" in str(t.requests[1].body["messages"])
 
 

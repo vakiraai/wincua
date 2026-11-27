@@ -42,6 +42,15 @@ class FallbackProvider:
     def describe(self) -> str:
         return " -> ".join(self.chain)
 
+    def escalate(self, reason: str) -> bool:
+        """Hand over to the next provider (e.g. after a loop). False if none is left."""
+        if self._index >= len(self.providers) - 1:
+            return False
+        nxt = getattr(self.providers[self._index + 1], "name", "?")
+        self.events.append(f"{self.name} escalated ({reason}); handing over to {nxt}")
+        self._index += 1
+        return True
+
     async def plan(
         self,
         *,

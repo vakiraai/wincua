@@ -54,7 +54,11 @@ def print_run(agent: Any, result: Any) -> None:
             print(f"  [turn {step['turn']}] {step['provider']}: {calls or '(no tool call)'}{note}")
         elif kind == "tool":
             status = "ok" if step.get("ok") else f"FAILED: {step.get('message')}"
+            if step.get("detail_log"):
+                status += f" (full detail: {step['detail_log']})"
             print(f"      -> {step.get('name')}: {status}")
+        elif kind == "escalate":
+            print(f"  ESCALATE: {step['reason']} -> {step.get('to') or 'stop'}")
         elif kind in {"error", "done", "abort", "ask_human"}:
             print(f"  - {step}")
     for event in getattr(agent.provider, "events", []) or []:
