@@ -15,6 +15,12 @@ from wincua_driver.types import (
 class NullBackend:
     name = "null"
 
+    def __init__(self) -> None:
+        self.allow: list[str] = []
+
+    def set_allow(self, allow: Sequence[str]) -> None:
+        self.allow = list(allow)
+
     async def observe(self, target: str, include: Sequence[str]) -> Observation:
         return Observation(
             errors=[

@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+windows = ["wincua[windows]"]
 local = ["wincua[local]"]
 cloud = ["wincua[cloud]"]
 mcp = ["wincua[mcp]"]

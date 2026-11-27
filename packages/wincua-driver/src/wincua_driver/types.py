@@ -69,7 +69,7 @@ class Semantic:
 
 Action = Click | Type | Invoke | Key | Semantic
 
-ModeUsed = Literal["background", "foreground", "dry-run", "mock", "null"]
+ModeUsed = Literal["background", "foreground", "dry-run", "mock", "null", "windows"]
 
 
 @dataclass
@@ -77,3 +77,5 @@ class ActionResult:
     ok: bool
     mode_used: ModeUsed = "null"
     error: StructuredError | None = None
+    # Optional success metadata (e.g. verified field value after type)
+    info: dict[str, Any] | None = None

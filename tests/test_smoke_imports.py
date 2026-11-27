@@ -34,16 +34,25 @@ def test_mock_backend_observe_act():
     asyncio.run(_run())
 
 
-def test_agent_stub_run():
+def test_agent_scripted_run_on_mock():
     import asyncio
 
     from wincua import Agent
-    from wincua.providers import NullProvider
+    from wincua.providers import ScriptedProvider
+    from wincua_driver.backend import set_backend
+    from wincua_providers.base import PlanStep
+
+    set_backend("mock")
 
     async def _run():
-        agent = Agent(task="noop", provider=NullProvider(), allow=[])
+        agent = Agent(
+            task="noop",
+            provider=ScriptedProvider([PlanStep(kind="done", message="ok")]),
+            allow=["calc.exe"],
+            backend="mock",
+        )
         result = await agent.run()
-        assert result.ok is False  # stub
+        assert result.ok is True
         assert result.steps
 
     asyncio.run(_run())
