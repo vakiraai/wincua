@@ -1,0 +1,50 @@
+[project]
+name = "wincua-workspace"
+version = "0.1.0"
+description = "wincua monorepo workspace (not published)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "wincua contributors" }]
+dependencies = [
+  "wincua",
+  "wincua-driver",
+  "wincua-providers",
+  "wincua-hitl",
+  "wincua-mcp",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+local = ["wincua[local]"]
+cloud = ["wincua[cloud]"]
+mcp = ["wincua[mcp]"]
+all = ["wincua[all]"]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+wincua = { workspace = true }
+wincua-driver = { workspace = true }
+wincua-providers = { workspace = true }
+wincua-hitl = { workspace = true }
+wincua-mcp = { workspace = true }
+wincua-excel = { workspace = true }
+wincua-slicer = { workspace = true }
+
+[tool.pytest.ini_options]
+addopts = "-p no:cacheprovider"
+testpaths = ["tests", "packages"]
+pythonpath = [
+  "packages/wincua/src",
+  "packages/wincua-driver/src",
+  "packages/wincua-providers/src",
+  "packages/wincua-hitl/src",
+  "packages/wincua-mcp/src",
+  "packages/wincua-excel/src",
+  "packages/wincua-slicer/src",
+]

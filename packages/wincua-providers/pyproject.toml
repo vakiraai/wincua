@@ -1,0 +1,21 @@
+[project]
+name = "wincua-providers"
+version = "0.1.0"
+description = "wincua provider bus — Ollama, OpenAI-compat, Null (HITL), cloud stubs"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "wincua contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+local = []  # httpx etc. when wired
+cloud = []  # anthropic / openai when wired
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wincua_providers"]
