@@ -39,10 +39,11 @@ from _llm_common import (  # noqa: E402
 GOLDEN = "42"
 EXPRESSION = "17 + 25"
 TASK = (
-    f"Open Windows Calculator (launch app='calculator', title='Calculator') and compute "
-    f"{EXPRESSION} by pressing its buttons with invoke. Useful AutomationIds: clearButton, "
-    "num0Button..num9Button, plusButton, equalButton. Press clearButton first. When the "
-    f"display shows {GOLDEN}, call done."
+    f"Compute {EXPRESSION} in Windows Calculator. First launch(app='calculator', title='Calculator'). "
+    "Then invoke each of these element_ids exactly once, in this order (you may send them all "
+    "in one turn): auto:clearButton, auto:num1Button, auto:num7Button, auto:plusButton, "
+    "auto:num2Button, auto:num5Button, auto:equalButton. "
+    f"When the display shows {GOLDEN}, call done."
 )
 ALLOW = [
     "CalculatorApp.exe",

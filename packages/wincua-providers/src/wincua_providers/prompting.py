@@ -12,20 +12,22 @@ SYSTEM_PROMPT = """\
 You are wincua, a computer-use agent operating real Windows desktop apps through \
 UI Automation (UIA) tools.
 
-Each turn you receive the current observation of the target window: a list of UI \
-elements (element_id | role | name | patterns), app state, errors and, when \
-available, a screenshot. Act with the provided tools.
+Each turn you receive the current observation of the target window: app state, \
+errors, a list of Elements (id role "name") and, when available, a screenshot. \
+Act with the provided tools.
 
 Rules:
-- Prefer invoke/type with element_id, auto_id or name from the observation over x/y clicks.
-- Take one or a few actions per turn, then look at the new observation.
-- If an action fails, read the error and try something else.
+- Use invoke/type with an element_id copied exactly from the Elements list; avoid x/y clicks.
+- You may take several actions per turn when you know the sequence (e.g. pressing digits).
+- Do not repeat an action that already succeeded unless the task needs it again; \
+check the history and move to the next step.
+- If an action fails, read the error and try a different element or approach.
 - Call done(message) only when the task is complete and the result is visible.
 - Call ask_human(question) if the task is ambiguous, risky or you are stuck; \
 call abort(reason) if it is impossible.
 - Never act on apps outside the task."""
 
-MAX_ELEMENTS = 150
+MAX_ELEMENTS = 80
 MAX_HISTORY_TURNS = 12
 
 
@@ -44,16 +46,48 @@ def observation_text(observation: Any, *, max_elements: int = MAX_ELEMENTS) -> s
     errors = getattr(observation, "errors", None) or []
     for err in errors:
         lines.append(f"Error [{getattr(err, 'code', '?')}]: {getattr(err, 'message', err)}")
-    uia = list(getattr(observation, "uia", None) or [])
-    if uia:
-        lines.append(f"UI elements ({min(len(uia), max_elements)} of {len(uia)}):")
-        lines.append("element_id | role | name | patterns")
-        for el in uia[:max_elements]:
-            patterns = ",".join(getattr(el, "patterns", ()) or ())
-            lines.append(f"{el.element_id} | {el.role} | {el.name} | {patterns}")
+    rows = compact_elements(getattr(observation, "uia", None) or [], max_elements=max_elements)
+    if rows:
+        lines.append("Elements (pass the id as element_id):")
+        lines.extend(f'{eid} {role} "{name}"' if name else f"{eid} {role}" for eid, role, name in rows)
     else:
         lines.append("UI elements: none (window missing or no UIA tree).")
     return "\n".join(lines)
+
+
+def auto_id_of(el: Any) -> str:
+    auto = getattr(el, "auto_id", "") or ""
+    eid = getattr(el, "element_id", "") or ""
+    return auto or (eid[5:] if eid.startswith("auto:") else "")
+
+
+def element_key(el: Any) -> str:
+    """Stable id to show the model: ``auto:<AutomationId>``, else ``name:<Name>``."""
+    auto = auto_id_of(el)
+    if auto:
+        return f"auto:{auto}"
+    eid = getattr(el, "element_id", "") or ""
+    if eid.startswith("name:") or not getattr(el, "name", ""):
+        return eid
+    return f"name:{el.name}"
+
+
+def compact_elements(uia: Sequence[Any], *, max_elements: int = MAX_ELEMENTS) -> list[tuple[str, str, str]]:
+    """(id, role, name) rows: named or AutomationId'd elements only, one row per id/name."""
+    with_auto = {el.name for el in uia if auto_id_of(el) and el.name}
+    rows: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for el in uia:
+        if not auto_id_of(el) and (not el.name or el.name in with_auto):
+            continue
+        key = element_key(el)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append((key, el.role or "", (el.name or "")[:80]))
+        if len(rows) >= max_elements:
+            break
+    return rows
 
 
 def screenshot_png(observation: Any) -> bytes | None:
@@ -172,6 +206,8 @@ def group_history(
 def history_note(entry: dict[str, Any]) -> str:
     kind = entry.get("kind")
     name = entry.get("name")
+    if kind == "escalation":
+        return str(entry.get("text"))
     if kind == "human_instruction":
         return f"Human instruction: {entry.get('text')}"
     if kind == "rejected":

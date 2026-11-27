@@ -96,9 +96,27 @@ Built-in defaults match the example file, so `[providers.ollama]` can be omitted
   Automation tools stay available and are preferred.
 
 All providers see the same tools: `launch`, `focus`, `open_url`, `invoke`,
-`type`, `click`, `key`, `wait`, `ask_human`, `done`, `abort`. When a tool fails,
-the model sees the error and can re-plan. After 5 failures or text-only replies
-in a row (`Agent.max_consecutive_errors`), the run stops.
+`type`, `click`, `key`, `wait`, `ask_human`, `done`, `abort`.
+
+Each observation lists elements as `id role "name"`. The id is a stable
+`auto:<AutomationId>` when the control has one, else `name:<Name>`. The Agent
+cleans up what a model sends before it reaches the driver:
+
+- An `element_id` that is a bare AutomationId, an older snapshot id (`clearButton_112`) or an element name is mapped to the matching element.
+- Empty values and stray keys (`role`) are dropped.
+- A `target` that is not the observed window's title is ignored.
+
+When a tool fails, the model sees a short error. Long driver output, such as
+UIA tree dumps, goes to `recordings/<session>-errors.log` when the recorder is on.
+
+**Loop guard.** The Agent hands planning to the next provider in the chain
+(ending in `null`, which asks the human) when any of these happen:
+
+- The same actions repeat for 3 turns without the screen changing.
+- 3 actions in a row fail.
+- The model replies 5 times in a row without a tool call (`Agent.max_consecutive_errors`).
+
+With no provider left, the run stops.
 
 ## `[driver]`
 

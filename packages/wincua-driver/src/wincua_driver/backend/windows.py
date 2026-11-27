@@ -1080,6 +1080,7 @@ class WindowsBackend:
                     name=str(name),
                     bounds=rect,
                     patterns=tuple(patterns),
+                    auto_id=str(auto_id),
                 )
                 self._elements[eid] = ref
                 self._wrappers[eid] = wrapper
@@ -1188,6 +1189,15 @@ class WindowsBackend:
                 except Exception:
                     continue
             return None
+        # Bare AutomationId ("clearButton") or a snapshot id from an older
+        # observation ("clearButton_112"): fall back to the AutomationId search.
+        base = re.sub(r"_\d+$", "", element_id)
+        for candidate in dict.fromkeys((element_id, base)):
+            if candidate and re.fullmatch(r"[A-Za-z][\w.]*", candidate):
+                ctrl = self._resolve_wrapper(f"auto:{candidate}")
+                if ctrl is not None:
+                    self._wrappers[element_id] = ctrl
+                    return ctrl
         return None
 
     async def observe(self, target: str, include: Sequence[str]) -> Observation:

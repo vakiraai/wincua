@@ -13,6 +13,7 @@ class ElementRef:
     name: str = ""
     bounds: tuple[int, int, int, int] | None = None
     patterns: tuple[str, ...] = ()
+    auto_id: str = ""  # UIA AutomationId; stable across observations, unlike element_id
 
 
 @dataclass(frozen=True)
