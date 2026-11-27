@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Any, Sequence
 
 from wincua_driver.types import (
     Action,
@@ -29,6 +29,34 @@ class MockBackend:
 
     def set_allow(self, allow: Sequence[str]) -> None:
         self.allow = list(allow)
+
+    async def list_windows(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "title": "Calculator",
+                "process": "ApplicationFrameHost.exe",
+                "pid": 1001,
+                "handle": 0x1001,
+                "class_name": "ApplicationFrameWindow",
+                "foreground": True,
+            },
+            {
+                "title": "wincua form demo - Microsoft Edge",
+                "process": "msedge.exe",
+                "pid": 1002,
+                "handle": 0x1002,
+                "class_name": "Chrome_WidgetWin_1",
+                "foreground": False,
+            },
+            {
+                "title": "Untitled - Notepad",
+                "process": "notepad.exe",
+                "pid": 1003,
+                "handle": 0x1003,
+                "class_name": "Notepad",
+                "foreground": False,
+            },
+        ]
 
     async def observe(self, target: str, include: Sequence[str]) -> Observation:
         uia: list[ElementRef] = []

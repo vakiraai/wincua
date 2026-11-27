@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Any, Sequence
 
 from wincua_driver.types import (
     Action,
@@ -20,6 +20,9 @@ class NullBackend:
 
     def set_allow(self, allow: Sequence[str]) -> None:
         self.allow = list(allow)
+
+    async def list_windows(self) -> list[dict[str, Any]]:
+        return []
 
     async def observe(self, target: str, include: Sequence[str]) -> Observation:
         return Observation(

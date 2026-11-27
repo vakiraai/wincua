@@ -2,19 +2,14 @@ def test_import_mcp():
     import wincua_mcp as m
 
     assert m.__version__
-    assert "session_start" in m.TOOL_NAMES
-    assert "observe" in m.TOOL_NAMES
+    assert set(m.TOOL_NAMES) == {"observe", "act", "launch", "list_windows", "ask_human"}
 
 
-def test_server_session_stub():
-    import asyncio
+def test_package_import_does_not_pull_in_sdk():
+    import os
+    import subprocess
+    import sys
 
-    from wincua_mcp.server import WinCUAMCPServer
-
-    async def _run():
-        s = WinCUAMCPServer()
-        out = await s.call_tool("session_start", {"allow": ["CalculatorApp.exe"]})
-        assert out["ok"] is True
-        assert out["session_id"]
-
-    asyncio.run(_run())
+    code = "import sys, wincua_mcp; assert 'mcp' not in sys.modules"
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+    subprocess.run([sys.executable, "-c", code], check=True, env=env)
