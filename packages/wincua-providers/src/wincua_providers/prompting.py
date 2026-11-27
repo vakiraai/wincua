@@ -85,11 +85,13 @@ def window_origin(observation: Any) -> tuple[int, int]:
     return 0, 0
 
 
-def user_turn_text(task: str, observation: Any, *, first: bool) -> str:
+def user_turn_text(task: str, observation: Any, *, first: bool, notes: Sequence[str] = ()) -> str:
     obs = observation_text(observation)
-    if first:
-        return f"Task: {task}\n\nCurrent observation:\n{obs}"
-    return f"Current observation:\n{obs}\n\nContinue the task: {task}"
+    head = f"Task: {task}" if first else ""
+    head = "\n".join([head, *notes]).strip()
+    tail = "" if first else f"\n\nContinue the task: {task}"
+    prefix = f"{head}\n\n" if head else ""
+    return f"{prefix}Current observation:\n{obs}{tail}"
 
 
 @dataclass
@@ -105,6 +107,12 @@ class Turn:
     index: int
     text: str | None = None
     calls: list[ToolCallRecord] = field(default_factory=list)
+    # Notes (human instructions, rejected actions…) with no tool call to attach to.
+    notes: list[str] = field(default_factory=list)
+
+
+# History entries that are planner tool calls; other kinds become notes.
+CALL_KINDS = frozenset({"tool", "ask_human", "done", "abort"})
 
 
 def result_text(entry: dict[str, Any]) -> str:
@@ -113,7 +121,7 @@ def result_text(entry: dict[str, Any]) -> str:
         return f"Human answered: {answer}" if answer is not None else "No human answer."
     res = entry.get("result")
     if res is None:
-        return "ok"
+        return "not executed"
     parts = ["ok" if res.get("ok", True) else "FAILED"]
     if res.get("message"):
         parts.append(str(res["message"]))
@@ -129,16 +137,26 @@ def group_history(
     """Group the Agent's flat history into model turns (assistant calls + results)."""
     turns: dict[int, Turn] = {}
     order: list[int] = []
-    for i, entry in enumerate(history or []):
-        idx = int(entry.get("turn", i))
+    last_idx = 0
+    for entry in history or []:
+        idx = int(entry["turn"]) if entry.get("turn") is not None else last_idx
+        last_idx = idx
         if idx not in turns:
             turns[idx] = Turn(index=idx)
             order.append(idx)
         turn = turns[idx]
-        if entry.get("kind") == "model_text":
+        kind = entry.get("kind")
+        if kind == "model_text":
             turn.text = entry.get("text") or ""
             continue
-        name = entry.get("name") or entry.get("kind") or "tool"
+        if kind not in CALL_KINDS or not entry.get("name"):
+            note = history_note(entry)
+            if turn.calls:
+                turn.calls[-1].result = f"{turn.calls[-1].result}\n{note}"
+            else:
+                turn.notes.append(note)
+            continue
+        name = entry["name"]
         call_id = entry.get("call_id") or f"call_{idx}_{len(turn.calls)}"
         turn.calls.append(
             ToolCallRecord(
@@ -149,6 +167,23 @@ def group_history(
             )
         )
     return [turns[i] for i in order][-max_turns:]
+
+
+def history_note(entry: dict[str, Any]) -> str:
+    kind = entry.get("kind")
+    name = entry.get("name")
+    if kind == "human_instruction":
+        return f"Human instruction: {entry.get('text')}"
+    if kind == "rejected":
+        return f"The human rejected {name}({json.dumps(clean_args(entry.get('args') or {}))}); do not retry it as is."
+    if kind == "tool_failed":
+        return f"{name} failed: {entry.get('message')}"
+    detail = {k: v for k, v in entry.items() if k not in {"turn", "call_id"}}
+    return f"Note: {json.dumps(detail, ensure_ascii=False, default=str)[:300]}"
+
+
+def orphan_notes(turns: Sequence[Turn]) -> list[str]:
+    return [n for t in turns for n in t.notes]
 
 
 NUDGE = "Reply with a tool call (or done / abort / ask_human)."
