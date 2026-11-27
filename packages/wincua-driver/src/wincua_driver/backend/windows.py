@@ -220,7 +220,7 @@ def probe_pywinauto() -> tuple[bool, str]:
         return False, format_pywinauto_import_error(exc)
 
 
-def match_window_title(title: str, target: str) -> bool:
+def match_window_title(title: str, target: str, *, exact: bool = False) -> bool:
     """True if a window title matches a launch/focus target string."""
     if not target:
         return False
@@ -230,7 +230,40 @@ def match_window_title(title: str, target: str) -> bool:
         return False
     if t == want:
         return True
+    if exact:
+        return t.lower() == want.lower()
     return want.lower() in t.lower()
+
+
+def is_calculator_target(target: str) -> bool:
+    """True when the caller is asking for the Win11 Calculator app."""
+    t = (target or "").strip().lower()
+    return t in {"calculator", "calc", "calc.exe", "calculatorapp.exe"}
+
+
+def window_class_name(wrapper: Any) -> str:
+    try:
+        return str(getattr(wrapper.element_info, "class_name", None) or "")
+    except Exception:
+        return ""
+
+
+def window_title_of(wrapper: Any) -> str:
+    try:
+        return (wrapper.window_text() or "").strip()
+    except Exception:
+        try:
+            return str(getattr(wrapper.element_info, "name", None) or "").strip()
+        except Exception:
+            return ""
+
+
+def is_calculator_frame(wrapper: Any) -> bool:
+    """Win11 Store Calculator top-level: ApplicationFrameWindow titled exactly Calculator."""
+    return (
+        window_class_name(wrapper) == "ApplicationFrameWindow"
+        and window_title_of(wrapper) == "Calculator"
+    )
 
 
 def expand_win_path(path: str) -> str:
@@ -391,6 +424,60 @@ def describe_uia_element(wrapper: Any) -> dict[str, Any]:
     }
 
 
+def _uia_direct_children(node: Any) -> list[Any]:
+    """Immediate children — same path the dump walker uses (crosses UWP hosts)."""
+    try:
+        kids = node.children()
+        if kids is not None:
+            return list(kids)
+    except Exception:
+        pass
+    try:
+        kids = node.descendants(depth=1)
+        if kids is not None:
+            return list(kids)
+    except Exception:
+        pass
+    return []
+
+
+def iter_uia_tree(
+    root: Any,
+    *,
+    max_depth: int | None = None,
+    max_nodes: int | None = None,
+    include_root: bool = True,
+):
+    """Depth-first walk via ``children()`` (no depth cap unless requested).
+
+    Shared by the dump helper and Calculator control lookup so both see the same
+    ApplicationFrameWindow → CoreWindow → NavView → LandmarkTarget tree.
+    """
+    count = 0
+
+    def walk(node: Any, depth: int):
+        nonlocal count
+        if max_nodes is not None and count >= max_nodes:
+            return
+        if include_root or depth > 0:
+            yield node, depth
+            count += 1
+        if max_depth is not None and depth >= max_depth:
+            return
+        if max_nodes is not None and count >= max_nodes:
+            return
+        for child in _uia_direct_children(node):
+            if max_nodes is not None and count >= max_nodes:
+                return
+            yield from walk(child, depth + 1)
+
+    if include_root:
+        yield from walk(root, 0)
+    else:
+        for child in _uia_direct_children(root):
+            yield from walk(child, 1)
+
+
 def format_uia_tree(
     root: Any,
     *,
@@ -399,12 +486,7 @@ def format_uia_tree(
 ) -> str:
     """Indented UIA tree dump (control_type, auto_id, name, class, process)."""
     lines: list[str] = []
-    count = 0
-
-    def walk(node: Any, depth: int) -> None:
-        nonlocal count
-        if count >= max_nodes or depth > max_depth:
-            return
+    for node, depth in iter_uia_tree(root, max_depth=max_depth, max_nodes=max_nodes):
         meta = describe_uia_element(node)
         pad = "  " * depth
         lines.append(
@@ -412,24 +494,102 @@ def format_uia_tree(
             f"name={meta['name']!r} class={meta['class_name']!r} "
             f"proc={meta['process']!r} pid={meta['pid']}"
         )
-        count += 1
-        if depth >= max_depth:
-            return
-        try:
-            children = node.children()
-        except Exception:
-            try:
-                children = node.descendants(depth=1)
-            except Exception:
-                children = []
-        for child in children:
-            if count >= max_nodes:
-                lines.append(f"{pad}  … truncated at {max_nodes} nodes")
-                return
-            walk(child, depth + 1)
-
-    walk(root, 0)
+    if max_nodes is not None and len(lines) >= max_nodes:
+        lines.append(f"  … truncated at {max_nodes} nodes")
     return "\n".join(lines) if lines else "<empty tree>"
+
+
+def find_uia_by_auto_id(
+    root: Any,
+    auto_id: str,
+    *,
+    control_type: str | None = None,
+    aliases: Sequence[str] | None = None,
+) -> Any | None:
+    """Find a descendant by AutomationId using the shared children() walk (uncapped)."""
+    wanted = tuple(aliases) if aliases else (auto_id,)
+    # Prefer pywinauto child_window (full descendant search) when available
+    for aid in wanted:
+        kwargs: dict[str, Any] = {"auto_id": aid}
+        if control_type:
+            kwargs["control_type"] = control_type
+        try:
+            ctrl = root.child_window(**kwargs)
+            if ctrl.exists(timeout=0.5):
+                return ctrl
+        except Exception:
+            pass
+        try:
+            found = root.descendants(auto_id=aid)
+            if found:
+                return found[0]
+        except Exception:
+            pass
+    # Same traversal as the dump — reliable across ApplicationFrameHost → CoreWindow
+    for node, _depth in iter_uia_tree(root, max_depth=None, max_nodes=None):
+        try:
+            aid = getattr(node.element_info, "automation_id", None) or ""
+        except Exception:
+            continue
+        if aid not in wanted:
+            continue
+        if control_type:
+            try:
+                ct = str(getattr(node.element_info, "control_type", None) or "")
+            except Exception:
+                ct = ""
+            if ct and ct != control_type:
+                continue
+        return node
+    return None
+
+
+def find_uia_by_name(
+    root: Any,
+    names: Sequence[str],
+    *,
+    control_type: str | None = None,
+    prefix: bool = False,
+) -> Any | None:
+    """Find a descendant by Name using child_window then the shared children() walk."""
+    for name in names:
+        kwargs: dict[str, Any] = {"title": name}
+        if control_type:
+            kwargs["control_type"] = control_type
+        try:
+            ctrl = root.child_window(**kwargs)
+            if ctrl.exists(timeout=0.3):
+                return ctrl
+        except Exception:
+            pass
+    for node, _depth in iter_uia_tree(root, max_depth=None, max_nodes=None):
+        try:
+            dname = getattr(node.element_info, "name", None) or ""
+        except Exception:
+            continue
+        if control_type:
+            try:
+                ct = str(getattr(node.element_info, "control_type", None) or "")
+            except Exception:
+                ct = ""
+            if ct and ct != control_type:
+                continue
+        for name in names:
+            if prefix:
+                if dname.startswith(name):
+                    return node
+            elif dname == name:
+                return node
+    return None
+
+
+def find_core_window(root: Any) -> Any | None:
+    """UWP content host under ApplicationFrameWindow (CalculatorApp.exe)."""
+    for node, _depth in iter_uia_tree(root, max_depth=8, max_nodes=80):
+        cls = window_class_name(node)
+        if cls == "Windows.UI.Core.CoreWindow" or cls.endswith(".CoreWindow"):
+            return node
+    return None
 
 
 def list_toplevel_by_process(process_name: str) -> list[tuple[Any, dict[str, Any]]]:
@@ -447,6 +607,26 @@ def list_toplevel_by_process(process_name: str) -> list[tuple[Any, dict[str, Any
         if (meta.get("process") or "").lower() == want:
             out.append((w, meta))
     return out
+
+
+def pick_calculator_frame(windows: Sequence[Any]) -> Any | None:
+    """Prefer ApplicationFrameWindow titled exactly Calculator; never a Chrome tab."""
+    exact_afw: list[Any] = []
+    exact_other: list[Any] = []
+    for w in windows:
+        title = window_title_of(w)
+        if title != "Calculator":
+            continue
+        if window_class_name(w) == "ApplicationFrameWindow":
+            exact_afw.append(w)
+        else:
+            exact_other.append(w)
+    if exact_afw:
+        return exact_afw[0]
+    if exact_other:
+        # Still better than a substring Chrome hit
+        return exact_other[0]
+    return None
 
 
 class WindowsBackend:
@@ -571,19 +751,21 @@ class WindowsBackend:
 
         # Enumerate — more reliable than WindowSpecification that always "exists"
         try:
-            windows = desktop.windows()
+            windows = list(desktop.windows())
         except Exception:
             windows = []
 
-        for w in windows:
-            try:
-                name = w.window_text() or ""
-            except Exception:
-                try:
-                    name = getattr(w.element_info, "name", "") or ""
-                except Exception:
-                    continue
-            if match_window_title(name, target) and self._window_is_usable(w):
+        usable = [w for w in windows if self._window_is_usable(w)]
+
+        # Calculator: exact title + ApplicationFrameWindow (avoid Chrome PR tabs)
+        if is_calculator_target(target) or (target or "").strip() == "Calculator":
+            frame = pick_calculator_frame(usable)
+            if frame is not None:
+                return frame
+            return None
+
+        for w in usable:
+            if match_window_title(window_title_of(w), target):
                 return w
         return None
 
@@ -611,10 +793,10 @@ class WindowsBackend:
         self._window = window
         if title:
             self._target_title = title
-        # Prefetch descendants so later auto:/name: lookups hit cache (UWP Calculator
-        # keeps buttons under ApplicationFrameHost → CalculatorApp content).
+        # Prefetch via the shared children() walk (same as dump) so UWP Calculator
+        # buttons under CoreWindow → NavView → LandmarkTarget are cached.
         try:
-            self._walk_uia(window, limit=250)
+            self._walk_uia(window, limit=500)
         except Exception:
             pass
 
@@ -659,8 +841,27 @@ class WindowsBackend:
             meta = describe_uia_element(window)
             return f"{meta.get('pid')}:{meta.get('name')}:{id(window)}"
 
+    def _calculator_frame(self, seed: Any | None = None) -> Any | None:
+        """ApplicationFrameWindow titled exactly Calculator (not Chrome / not process connect)."""
+        if seed is not None and is_calculator_frame(seed):
+            return seed
+        found = self._find_window_once("Calculator")
+        if found is not None:
+            return found
+        # Desktop re-scan by class — CalculatorApp.exe has no top-level window of its own
+        try:
+            for w in self._desktop().windows():
+                if self._window_is_usable(w) and is_calculator_frame(w):
+                    return w
+        except Exception:
+            pass
+        for w, _meta in list_toplevel_by_process("ApplicationFrameHost.exe"):
+            if is_calculator_frame(w):
+                return w
+        return None
+
     def _calculator_roots(self, seed: Any | None = None) -> list[Any]:
-        """Candidate UIA roots: title match, CalculatorApp.exe process, CoreWindow."""
+        """Search roots: CoreWindow under ApplicationFrameWindow, then the frame itself."""
         roots: list[Any] = []
         seen: set[str] = set()
 
@@ -673,50 +874,15 @@ class WindowsBackend:
             seen.add(key)
             roots.append(w)
 
-        add(seed)
-        add(self._find_window_once("Calculator"))
-
-        # Direct connect to CalculatorApp.exe (not just ApplicationFrameHost frame)
-        try:
-            from pywinauto import Application
-
-            app = Application(backend="uia").connect(path="CalculatorApp.exe", timeout=3)
-            try:
-                for w in app.windows():
-                    add(w)
-            except Exception:
-                pass
-            try:
-                add(app.top_window())
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-        for w, _meta in list_toplevel_by_process("CalculatorApp.exe"):
-            add(w)
-        for w, _meta in list_toplevel_by_process("ApplicationFrameHost.exe"):
-            try:
-                title = w.window_text() or ""
-            except Exception:
-                title = ""
-            if match_window_title(title, "Calculator"):
-                add(w)
-
-        # UWP CoreWindow often hosts the real controls
-        try:
-            desktop = self._desktop()
-            for w in desktop.windows():
-                try:
-                    cls = getattr(w.element_info, "class_name", "") or ""
-                    title = w.window_text() or ""
-                except Exception:
-                    continue
-                if "CoreWindow" in cls and match_window_title(title, "Calculator"):
-                    add(w)
-        except Exception:
-            pass
-
+        frame = self._calculator_frame(seed)
+        if frame is not None:
+            core = find_core_window(frame)
+            # Prefer CoreWindow — that is where num1Button / clearButton live
+            add(core)
+            add(frame)
+        elif seed is not None and is_calculator_frame(seed):
+            add(find_core_window(seed))
+            add(seed)
         return roots
 
     def _find_by_name(
@@ -727,30 +893,9 @@ class WindowsBackend:
         control_type: str | None = "Button",
         prefix: bool = False,
     ) -> Any | None:
-        for name in names:
-            kwargs: dict[str, Any] = {"title": name}
-            if control_type:
-                kwargs["control_type"] = control_type
-            try:
-                ctrl = root.child_window(**kwargs)
-                if ctrl.exists(timeout=0.3):
-                    return ctrl
-            except Exception:
-                pass
-            try:
-                for d in root.descendants():
-                    try:
-                        dname = getattr(d.element_info, "name", None) or ""
-                    except Exception:
-                        continue
-                    if prefix:
-                        if dname.startswith(name):
-                            return d
-                    elif dname == name:
-                        return d
-            except Exception:
-                continue
-        return None
+        return find_uia_by_name(
+            root, names, control_type=control_type, prefix=prefix
+        )
 
     def _deep_find_auto_id(
         self,
@@ -762,39 +907,20 @@ class WindowsBackend:
         """Find a control by AutomationId under a UWP/top-level root (deep search)."""
         deadline = time.time() + max(0.2, timeout_s)
         aliases = _CALC_AUTO_ID_ALIASES.get(auto_id, (auto_id,))
+        # Buttons for keypad; display is not a Button
+        prefer_button = auto_id not in ("CalculatorResults", "CalculatorExpression")
         while time.time() < deadline:
-            for aid in aliases:
-                # 1) child_window from root (searches descendants in UIA backend)
-                try:
-                    ctrl = root.child_window(auto_id=aid)
-                    if ctrl.exists(timeout=0.4):
-                        return ctrl
-                except Exception:
-                    pass
-                try:
-                    ctrl = root.child_window(auto_id=aid, control_type="Button")
-                    if ctrl.exists(timeout=0.3):
-                        return ctrl
-                except Exception:
-                    pass
-                # 2) descendants(auto_id=...)
-                try:
-                    found = root.descendants(auto_id=aid)
-                    if found:
-                        return found[0]
-                except Exception:
-                    pass
-                # 3) Manual walk of descendants (most reliable for UWP hosting)
-                try:
-                    for d in root.descendants():
-                        try:
-                            if (getattr(d.element_info, "automation_id", None) or "") == aid:
-                                return d
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
-            # 4) Name fallbacks (EN Calculator)
+            ctrl = find_uia_by_auto_id(
+                root,
+                auto_id,
+                control_type="Button" if prefer_button else None,
+                aliases=aliases,
+            )
+            if ctrl is None and prefer_button:
+                ctrl = find_uia_by_auto_id(root, auto_id, aliases=aliases)
+            if ctrl is not None:
+                return ctrl
+            # Name fallbacks (EN Calculator)
             names = _CALC_NAME_FALLBACKS.get(auto_id, ())
             if names:
                 prefix = auto_id == "CalculatorResults"
@@ -806,10 +932,10 @@ class WindowsBackend:
                 )
                 if ctrl is not None:
                     return ctrl
-            time.sleep(0.2)
+            time.sleep(0.15)
         return None
 
-    def _short_tree_dump(self, roots: Sequence[Any], *, max_depth: int = 4, max_nodes: int = 60) -> str:
+    def _short_tree_dump(self, roots: Sequence[Any], *, max_depth: int = 6, max_nodes: int = 120) -> str:
         chunks: list[str] = []
         for i, root in enumerate(roots[:3]):
             meta = describe_uia_element(root)
@@ -897,16 +1023,27 @@ class WindowsBackend:
         )
         while time.time() < deadline:
             roots = self._calculator_roots(seed)
+            frame = self._calculator_frame(seed)
+            focus_target = frame or (roots[0] if roots else seed)
+            if focus_target is not None:
+                self._restore_and_focus(focus_target)
             for root in roots:
-                self._restore_and_focus(root)
                 ready = self._wait_controls(
                     root, wanted, timeout_s=min(2.5, max(0.5, deadline - time.time()))
                 )
                 if ready is not None:
                     self._bind_window(root, title="Calculator")
-                    return root, ready, self._short_tree_dump([root])
+                    if frame is not None:
+                        try:
+                            self._restore_and_focus(frame)
+                        except Exception:
+                            pass
+                    return root, ready, self._short_tree_dump(
+                        [r for r in (frame, root) if r is not None]
+                    )
             time.sleep(0.3)
-        tree = self._short_tree_dump(roots)
+        dump_roots = roots or ([frame] if (frame := self._calculator_frame(seed)) else [])
+        tree = self._short_tree_dump(dump_roots)
         return None, None, tree
 
     def _walk_uia(self, window: Any, limit: int = 120) -> list[ElementRef]:
@@ -955,15 +1092,10 @@ class WindowsBackend:
             except Exception:
                 return
 
-        add(window)
-        try:
-            descendants = window.descendants()
-        except Exception:
-            descendants = []
-        for child in descendants:
+        for node, _depth in iter_uia_tree(window, max_depth=None, max_nodes=limit):
+            add(node)
             if len(refs) >= limit:
                 break
-            add(child)
         return refs
 
     def _search_roots(self) -> list[Any]:

@@ -49,10 +49,14 @@ def main(argv: list[str] | None = None) -> int:
 
     from wincua_driver.backend.windows import (
         describe_uia_element,
+        find_core_window,
         format_uia_tree,
+        is_calculator_frame,
+        is_calculator_target,
         is_windows,
         list_toplevel_by_process,
         match_window_title,
+        pick_calculator_frame,
         probe_pywinauto,
         windows_unavailable_error,
     )
@@ -70,15 +74,37 @@ def main(argv: list[str] | None = None) -> int:
     from pywinauto import Application, Desktop
 
     title = args.title
-    print(f"=== top-level windows matching title={title!r} ===")
     desktop = Desktop(backend="uia")
-    matched = 0
     try:
-        windows = desktop.windows()
+        windows = list(desktop.windows())
     except Exception as exc:
         print(f"Desktop.windows() failed: {exc}", file=sys.stderr)
         return 1
 
+    # Preferred Calculator path: ApplicationFrameWindow + exact title
+    if is_calculator_target(title) or title.strip() == "Calculator":
+        preferred = pick_calculator_frame(windows)
+        print("=== preferred Calculator frame (ApplicationFrameWindow, title==Calculator) ===")
+        if preferred is None:
+            print("(none)")
+        else:
+            meta = describe_uia_element(preferred)
+            print(
+                f"\n--- frame title={meta['name']!r} proc={meta['process']!r} "
+                f"pid={meta['pid']} class={meta['class_name']!r} ---"
+            )
+            print(format_uia_tree(preferred, max_depth=args.depth, max_nodes=args.max_nodes))
+            core = find_core_window(preferred)
+            if core is not None:
+                cmeta = describe_uia_element(core)
+                print(
+                    f"\n--- CoreWindow title={cmeta['name']!r} proc={cmeta['process']!r} "
+                    f"pid={cmeta['pid']} class={cmeta['class_name']!r} ---"
+                )
+                print(format_uia_tree(core, max_depth=args.depth, max_nodes=args.max_nodes))
+
+    print(f"\n=== top-level windows matching title={title!r} (substring; may include Chrome) ===")
+    matched = 0
     for w in windows:
         try:
             wtitle = w.window_text() or ""
@@ -88,8 +114,9 @@ def main(argv: list[str] | None = None) -> int:
             continue
         matched += 1
         meta = describe_uia_element(w)
+        flag = " [preferred AFW]" if is_calculator_frame(w) else ""
         print(
-            f"\n--- match[{matched}] title={wtitle!r} "
+            f"\n--- match[{matched}]{flag} title={wtitle!r} "
             f"proc={meta['process']!r} pid={meta['pid']} "
             f"class={meta['class_name']!r} ---"
         )
@@ -105,10 +132,10 @@ def main(argv: list[str] | None = None) -> int:
                 continue
 
     print("\n=== CalculatorApp.exe top-level windows ===")
+    print("(expected empty: CoreWindow is a child of ApplicationFrameHost, not top-level)")
     calc_wins = list_toplevel_by_process("CalculatorApp.exe")
     if not calc_wins:
         print("(none via Desktop filter)")
-        # Also try Application.connect(path=...)
         try:
             app = Application(backend="uia").connect(path="CalculatorApp.exe", timeout=3)
             try:
@@ -145,12 +172,12 @@ def main(argv: list[str] | None = None) -> int:
         print(format_uia_tree(w, max_depth=args.depth, max_nodes=args.max_nodes))
 
     if idx == 0:
-        print("(no CalculatorApp.exe windows found — is Calculator running?)")
+        print("(no CalculatorApp.exe top-level windows)")
 
-    print("\n=== ApplicationFrameHost.exe windows titled Calculator ===")
+    print("\n=== ApplicationFrameHost.exe windows titled exactly Calculator ===")
     afh = 0
     for w, meta in list_toplevel_by_process("ApplicationFrameHost.exe"):
-        if not match_window_title(meta.get("name") or "", "Calculator"):
+        if (meta.get("name") or "") != "Calculator" and not is_calculator_frame(w):
             continue
         afh += 1
         print(
