@@ -266,6 +266,11 @@ class Agent:
                 )
                 entry = history[-1]
                 entry.update(call_id=pstep.call_id, turn=turn)
+                if recovers and pstep.kind == "tool":
+                    pstep.args = normalize_model_args(
+                        pstep.name or "", dict(pstep.args or {}), last_obs, current_target=target
+                    )
+                    entry["args"] = pstep.args
 
                 if pstep.kind == "done":
                     finished = True
@@ -300,9 +305,6 @@ class Agent:
                 # tool (or bare name treated as tool)
                 tool_name = pstep.name or pstep.kind
                 args = dict(pstep.args or {})
-                if recovers:
-                    args = normalize_model_args(tool_name, args, last_obs, current_target=target)
-                    entry["args"] = args
                 result_record = await self._dispatch_tool(
                     tool_name=tool_name,
                     args=args,
