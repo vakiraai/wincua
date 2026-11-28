@@ -740,6 +740,46 @@ class WindowsBackend:
             titles.append(f"<enumerate failed: {exc}>")
         return titles
 
+    async def list_windows(self) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._list_windows_sync)
+
+    def _list_windows_sync(self) -> list[dict[str, Any]]:
+        """Visible titled top-level windows in desktop (z-) order."""
+        foreground = 0
+        try:
+            import win32gui  # type: ignore
+
+            foreground = int(win32gui.GetForegroundWindow())
+        except Exception:
+            pass
+        out: list[dict[str, Any]] = []
+        try:
+            windows = list(self._desktop().windows())
+        except Exception:
+            return out
+        for w in windows:
+            if not self._window_is_usable(w):
+                continue
+            title = window_title_of(w)
+            if not title:
+                continue
+            meta = describe_uia_element(w)
+            try:
+                handle = int(w.handle)
+            except Exception:
+                handle = 0
+            out.append(
+                {
+                    "title": title,
+                    "process": meta.get("process") or "",
+                    "pid": meta.get("pid") or 0,
+                    "handle": handle,
+                    "class_name": meta.get("class_name") or "",
+                    "foreground": bool(handle and handle == foreground),
+                }
+            )
+        return out
+
     def _find_window_once(self, target: str) -> Any | None:
         desktop = self._desktop()
         if target in ("", "foreground", "desktop"):
@@ -1862,7 +1902,7 @@ class WindowsBackend:
                         },
                     ),
                 )
-            return ActionResult(ok=True, mode_used="windows")
+            return ActionResult(ok=True, mode_used="windows", info={"title": "Calculator"})
 
         self._bind_window(window, title=title)
         try:
@@ -1870,7 +1910,11 @@ class WindowsBackend:
         except Exception:
             pass
 
-        return ActionResult(ok=True, mode_used="windows")
+        return ActionResult(
+            ok=True,
+            mode_used="windows",
+            info={"title": window_title_of(window) or title},
+        )
 
     def _open_url(
         self,
@@ -2068,5 +2112,6 @@ class WindowsBackend:
                 "browser": str(started),
                 "profile_dir": profile_dir,
                 "new_window": new_window,
+                "title": window_title_of(window) or str(matched_hint or title_hints[0]),
             },
         )

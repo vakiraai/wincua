@@ -153,10 +153,15 @@ obs = await observe(target="Calculator", include=["uia", "app"])
 
 ## MCP
 
-```bash
-python -m pip install -e packages/wincua-mcp
-wincua-mcp          # or: python -m wincua_mcp
+```powershell
+python -m pip install -e "packages/wincua-driver[windows]" -e packages/wincua-hitl -e packages/wincua-mcp
+wincua-mcp --allow calc --allow msedge.exe   # stdio; or: python -m wincua_mcp
 ```
+
+Tools: `observe`, `act`, `launch`, `list_windows`, `ask_human`. Stdio by default,
+streamable HTTP with `--transport http`. The allow-list is fail-closed, and risky
+actions go through HITL. Config (`[mcp]` in `wincua.toml`) and ready-to-paste
+Cursor / Claude Desktop snippets are in [packages/wincua-mcp/README.md](./packages/wincua-mcp/README.md).
 
 Run the MCP server on the **same interactive Windows logon session** as the
 desktop being driven.
