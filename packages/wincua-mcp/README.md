@@ -118,6 +118,8 @@ wincua-mcp --print-config        # sanity check
 If `pip` tries to compile `pydantic-core` (a dependency of `mcp`), your Python
 version has no wheel yet; use Python 3.12 or 3.13 for the MCP venv.
 
+If the server fails with `No module named 'mcp'` (`--print-config` still works without it), reinstall in the same venv: `python -m pip install -e packages/wincua-mcp`.
+
 ### Cursor (`mcp.json`)
 
 Global: `%USERPROFILE%\.cursor\mcp.json`, or per project: `.cursor\mcp.json`.
