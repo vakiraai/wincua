@@ -545,7 +545,17 @@ class Agent:
                         break
                 error_streak = 0
                 # Allow scripts to retarget observe
-                if tool_name in ("observe", "focus", "launch", "open_url") and args.get(
+                if tool_name == "open_url" and result_record.get("ok"):
+                    info = result_record.get("info") or {}
+                    target = str(
+                        args.get("target")
+                        or info.get("bound_target")
+                        or info.get("page")
+                        or info.get("document")
+                        or info.get("title")
+                        or target
+                    )
+                elif tool_name in ("observe", "focus", "launch", "open_url") and args.get(
                     "target"
                 ):
                     target = str(args["target"])

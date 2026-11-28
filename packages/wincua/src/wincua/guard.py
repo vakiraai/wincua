@@ -39,10 +39,13 @@ def normalize_model_args(
     """
     out = {k: v for k, v in args.items() if v not in (None, "") and k not in ("role", "tool")}
     if "target" in out:
-        titles = {str(current_target or "").lower()}
+        from wincua_driver.backend.windows import match_window_title
+
+        want = str(out["target"])
+        observed = [str(current_target or "")]
         app = getattr(observation, "app", None) or {}
-        titles |= {str(app.get(k) or "").lower() for k in ("title", "target")}
-        if str(out["target"]).lower() not in titles - {""}:
+        observed.extend(str(app.get(k) or "") for k in ("title", "target", "page"))
+        if not any(t and match_window_title(t, want) for t in observed if t):
             out.pop("target")
     if tool not in ELEMENT_TOOLS:
         return out

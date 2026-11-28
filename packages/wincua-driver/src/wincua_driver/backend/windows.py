@@ -222,19 +222,41 @@ def probe_pywinauto() -> tuple[bool, str]:
         return False, format_pywinauto_import_error(exc)
 
 
+_TITLE_ZW_CHARS = re.compile(r"[\u200b\u200c\u200d\ufeff\u2060]+")
+
+
+def normalize_title_text(title: str) -> str:
+    """Strip zero-width/format chars Edge puts in titles (e.g. before ``Edge``)."""
+    t = (title or "").strip()
+    t = _TITLE_ZW_CHARS.sub("", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def page_title_segment(title: str) -> str:
+    """Page/tab name: first segment before browser profile / product suffixes."""
+    t = normalize_title_text(title)
+    if " - " in t:
+        return t.split(" - ", 1)[0].strip()
+    return t
+
+
 def match_window_title(title: str, target: str, *, exact: bool = False) -> bool:
     """True if a window title matches a launch/focus target string."""
     if not target:
         return False
-    t = (title or "").strip()
-    want = target.strip()
+    t = normalize_title_text(title)
+    want = normalize_title_text(target)
     if not t:
         return False
     if t == want:
         return True
     if exact:
         return t.lower() == want.lower()
-    return want.lower() in t.lower()
+    tl, wl = t.lower(), want.lower()
+    if wl in tl:
+        return True
+    page = page_title_segment(t).lower()
+    return wl == page or wl in page
 
 
 def is_calculator_target(target: str) -> bool:
@@ -917,6 +939,8 @@ class WindowsBackend:
         self._target_title: str | None = None
         self._id_seq = 0
         self._temp_profile_dirs: list[str] = []
+        self._bound_hwnd: int | None = None
+        self._bound_pid: int | None = None
 
         # Soften pywinauto global timings so missing windows fail with our errors
         try:
@@ -1006,10 +1030,23 @@ class WindowsBackend:
         desktop = self._desktop()
         if target in ("", "foreground", "desktop"):
             try:
-                wins = [w for w in desktop.windows() if self._window_is_usable(w)]
-                return wins[0] if wins else None
+                usable = [w for w in desktop.windows() if self._window_is_usable(w)]
             except Exception:
                 return None
+            try:
+                import win32gui  # type: ignore
+
+                fg = int(win32gui.GetForegroundWindow())
+            except Exception:
+                fg = 0
+            if fg:
+                for w in usable:
+                    try:
+                        if int(w.handle) == fg:
+                            return w
+                    except Exception:
+                        continue
+            return usable[0] if usable else None
 
         # Enumerate — more reliable than WindowSpecification that always "exists"
         try:
@@ -1018,6 +1055,10 @@ class WindowsBackend:
             windows = []
 
         usable = [w for w in windows if self._window_is_usable(w)]
+
+        bound = self._matching_bound_browser(target)
+        if bound is not None:
+            return bound
 
         # Calculator: exact title + ApplicationFrameWindow (avoid Chrome PR tabs)
         if is_calculator_target(target) or (target or "").strip() == "Calculator":
@@ -1050,12 +1091,32 @@ class WindowsBackend:
                 return None
             time.sleep(0.25)
 
+    def _matching_bound_browser(self, target: str) -> Any | None:
+        """Keep a bound browser window when ``target`` still names that page."""
+        if self._window is None or not is_browser_window(self._window):
+            return None
+        if target in ("", "foreground", "desktop"):
+            return self._window
+        for candidate in (self._target_title, window_title_of(self._window)):
+            if candidate and match_window_title(candidate, target):
+                return self._window
+        return None
+
     def _bind_window(self, window: Any, title: str | None = None) -> None:
         """Remember the UIA root and warm the wrapper cache via a deep walk."""
         self._window = window
         self._toplevel_hwnd = None
         if title:
             self._target_title = title
+        try:
+            self._bound_hwnd = int(window.handle)
+        except Exception:
+            self._bound_hwnd = None
+        try:
+            pid = int(describe_uia_element(window).get("pid") or 0)
+            self._bound_pid = pid or None
+        except Exception:
+            self._bound_pid = None
         self._content_root = None
         root = window
         if is_browser_window(window):
@@ -1089,6 +1150,14 @@ class WindowsBackend:
         """
         # Calculator binds its CoreWindow while _find_window returns the outer
         # ApplicationFrameWindow, so compare by bound target, not by window.
+        bound = self._matching_bound_browser(target)
+        if bound is not None:
+            try:
+                alive = not hasattr(bound, "exists") or bound.exists(timeout=0)
+            except Exception:
+                alive = False
+            if alive:
+                return
         if self._window is not None and self._target_title == target:
             try:
                 alive = not hasattr(self._window, "exists") or self._window.exists(timeout=0)
@@ -1634,7 +1703,8 @@ class WindowsBackend:
         screenshot = None
         app: dict[str, Any] | None = None
 
-        window = self._find_window(target, timeout_s=min(5.0, self.launch_timeout_s))
+        bound = self._matching_bound_browser(target)
+        window = bound if bound is not None else self._find_window(target, timeout_s=min(5.0, self.launch_timeout_s))
         is_calc = match_window_title(target, "Calculator") or target.lower() == "calculator"
         if window is None and is_calc:
             # Title miss — still try CalculatorApp.exe process windows
@@ -2463,6 +2533,56 @@ class WindowsBackend:
             info={"title": window_title_of(window) or title},
         )
 
+    def _score_browser_window(self, window: Any, hints: Sequence[str]) -> int:
+        title = window_title_of(window)
+        score = 0
+        for i, hint in enumerate(hints):
+            if not hint:
+                continue
+            if match_window_title(title, str(hint)):
+                score = max(score, 100 - i)
+        if is_browser_window(window):
+            score += 5
+        return score
+
+    def _find_browser_window_launched(
+        self,
+        *,
+        pid: int,
+        exe_name: str,
+        hints: Sequence[str],
+        deadline: float,
+        profile_dir: str | None,
+    ) -> Any | None:
+        """Prefer a browser top-level window owned by the process we just started."""
+        want_proc = Path(exe_name).name.lower()
+        best: Any | None = None
+        best_score = 0
+        try:
+            windows = [w for w in self._desktop().windows() if self._window_is_usable(w)]
+        except Exception:
+            return None
+        for w in windows:
+            if not is_browser_window(w):
+                continue
+            meta = describe_uia_element(w)
+            proc = (meta.get("process") or "").lower()
+            wp = int(meta.get("pid") or 0)
+            if pid and wp != pid and proc != want_proc:
+                continue
+            try:
+                text = window_title_of(w)
+            except Exception:
+                text = ""
+            if "more page" in text.lower() and profile_dir:
+                continue
+            score = self._score_browser_window(w, hints)
+            if wp == pid:
+                score += 20
+            if score > best_score:
+                best, best_score = w, score
+        return best if best_score > 0 else None
+
     def _open_url(
         self,
         url: str,
@@ -2535,6 +2655,7 @@ class WindowsBackend:
 
         tried: list[str] = []
         started: Path | None = None
+        launch_pid = 0
         launch_argv: list[str] = []
         for name in order:
             denied = self._check_process_allowed(name)
@@ -2564,8 +2685,9 @@ class WindowsBackend:
                 ]
             )
             try:
-                self._popen(argv)
+                proc = self._popen(argv)
                 started = exe
+                launch_pid = int(getattr(proc, "pid", 0) or 0)
                 launch_argv = argv
                 tried.append(f"{exe}:ok")
                 break
@@ -2611,22 +2733,35 @@ class WindowsBackend:
         started_at = time.time()
         deadline = started_at + timeout
         while time.time() < deadline and window is None:
+            if launch_pid:
+                window = self._find_browser_window_launched(
+                    pid=launch_pid,
+                    exe_name=started.name,
+                    hints=title_hints,
+                    deadline=deadline,
+                    profile_dir=profile_dir,
+                )
+                if window is not None:
+                    matched_hint = title or title_hints[0]
+                    break
             # A bare "Edge" title would also match the user's own browser windows;
             # only fall back to it late, if the page title never showed up.
             late = time.time() - started_at > timeout * 0.6
             for hint in title_hints:
                 if hint in generic_hints and not late:
                     continue
-                window = self._find_window_once(str(hint))
-                if window is not None:
+                candidate = self._find_window_once(str(hint))
+                if candidate is not None and not is_browser_window(candidate):
+                    candidate = None
+                if candidate is not None:
                     # Prefer a window that does NOT say "and N more page" (multi-tab reuse)
                     try:
-                        t = window.window_text() or ""
+                        t = window_title_of(candidate)
                     except Exception:
                         t = ""
                     if "more page" in t.lower() and profile_dir:
-                        window = None
                         continue
+                    window = candidate
                     matched_hint = hint
                     break
             if window is None:
@@ -2658,12 +2793,15 @@ class WindowsBackend:
             )
 
         hint = str(matched_hint or title_hints[0])
-        doc_ready = self._wait_browser_document(window, hint, timeout_s=min(15.0, max(3.0, deadline - time.time())))
-        self._bind_window(window, title=hint)
+        actual_title = window_title_of(window) or hint
+        bound_target = title or page_title_segment(actual_title) or hint
+        doc_ready = self._wait_browser_document(window, bound_target, timeout_s=min(15.0, max(3.0, deadline - time.time())))
+        self._bind_window(window, title=actual_title)
         try:
             window.set_focus()
         except Exception:
             pass
+        page = page_title_segment(actual_title)
         return ActionResult(
             ok=True,
             mode_used="windows",
@@ -2671,7 +2809,11 @@ class WindowsBackend:
                 "browser": str(started),
                 "profile_dir": profile_dir,
                 "new_window": new_window,
-                "title": window_title_of(window) or hint,
+                "title": actual_title,
+                "page": page,
+                "bound_target": bound_target,
+                "hwnd": self._bound_hwnd,
+                "pid": self._bound_pid or launch_pid or None,
                 "document": uia_name(self._content_root) if self._content_root is not None else None,
                 "document_ready": doc_ready,
             },
