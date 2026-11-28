@@ -25,7 +25,7 @@ _TOOLS_UNSUPPORTED = (
     "function calling",
 )
 _IMAGES_UNSUPPORTED = (
-    "image input is not supported",
+    "image input",
     "mmproj",
     "multimodal",
     "does not support images",

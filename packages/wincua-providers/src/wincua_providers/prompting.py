@@ -18,7 +18,9 @@ Act with the provided tools.
 
 Rules:
 - Use invoke/type with an element_id copied exactly from the Elements list; avoid x/y clicks.
-- You may take several actions per turn when you know the sequence (e.g. pressing digits).
+- You may take several actions per turn when you know the sequence (e.g. pressing digits): \
+make one separate tool call per action, in order. Never put a tool call inside another \
+call's arguments.
 - Do not repeat an action that already succeeded unless the task needs it again; \
 check the history and move to the next step.
 - If an action fails, read the error and try a different element or approach.

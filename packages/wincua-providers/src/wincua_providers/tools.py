@@ -171,6 +171,96 @@ def anthropic_tools(specs: list[dict[str, Any]] | None = None) -> list[dict[str,
     ]
 
 
+_NEST_KEYS = ("args", "arguments", "parameters", "input")
+_BATCH_KEYS = ("actions", "calls", "steps", "tool_calls")
+MAX_CALLS_PER_REPLY = 20
+
+
+def _call_name(item: dict[str, Any]) -> str | None:
+    fn = item.get("function")
+    if isinstance(fn, dict) and fn.get("name") in TOOL_NAMES:
+        return str(fn["name"])
+    # "name" is also an element-name argument, so only a known tool name counts.
+    for key in ("tool", "name"):
+        val = item.get(key)
+        if isinstance(val, str) and val in TOOL_NAMES:
+            return val
+    return None
+
+
+def _call_args(item: dict[str, Any]) -> dict[str, Any]:
+    fn = item.get("function")
+    if isinstance(fn, dict):
+        return parse_arguments(fn.get("arguments"))
+    return {k: v for k, v in item.items() if not (k in ("tool", "name") and v in TOOL_NAMES)}
+
+
+def expand_tool_calls(
+    name: str, args: Any, *, limit: int = MAX_CALLS_PER_REPLY
+) -> list[tuple[str, dict[str, Any]]]:
+    """Flatten one model tool call into an ordered list of calls.
+
+    Small models batch by nesting the next call inside the arguments, e.g.
+    ``invoke(element_id=A, tool="invoke", args={"element_id": B, "args": {...}})``
+    or by listing calls under ``actions``. That becomes ``[invoke(A), invoke(B), ...]``.
+    A stray ``tool`` key naming the tool itself is dropped.
+    """
+    out: list[tuple[str, dict[str, Any]]] = []
+
+    def walk(tool: str, raw: Any, depth: int) -> None:
+        if len(out) >= limit:
+            return
+        params = dict(parse_arguments(raw))
+        stray = params.pop("tool", None)
+        if tool not in TOOL_NAMES and isinstance(stray, str) and stray in TOOL_NAMES:
+            tool = stray
+        if tool not in TOOL_NAMES or depth > 8:
+            out.append((tool, params))
+            return
+        nested: list[tuple[str, Any]] = []
+        for key in (*_NEST_KEYS, *_BATCH_KEYS):
+            if key not in params:
+                continue
+            val = params[key]
+            items = val if isinstance(val, list) else [val]
+            if key in _NEST_KEYS and isinstance(val, str):
+                parsed = parse_arguments(val)
+                items = [parsed] if parsed else []
+                if not parsed:
+                    continue
+            if not all(isinstance(i, dict) for i in items):
+                continue
+            params.pop(key)
+            for item in items:
+                inner_name = _call_name(item)
+                inner = _call_args(item)
+                if inner_name is None and key in _NEST_KEYS and not _own_args(params):
+                    # invoke(args={"element_id": ...}): plain wrapped arguments.
+                    params.update({k: v for k, v in inner.items() if k != "tool"})
+                    continue
+                nested.append((inner_name or tool, inner))
+        if _own_args(params) or not nested:
+            out.append((tool, params))
+        for inner_name, inner in nested:
+            walk(inner_name, inner, depth + 1)
+
+    walk(name, args, 0)
+    return out[:limit]
+
+
+def _own_args(params: dict[str, Any]) -> bool:
+    return any(v not in (None, "", {}, []) for v in params.values())
+
+
+def to_plan_steps(name: str, args: Any, call_id: str | None = None) -> list[PlanStep]:
+    """``to_plan_step`` for every call in a (possibly nested / batched) model tool call."""
+    calls = expand_tool_calls(name, args)
+    return [
+        to_plan_step(n, a, call_id if i == 0 or not call_id else f"{call_id}_{i}")
+        for i, (n, a) in enumerate(calls)
+    ]
+
+
 def to_plan_step(name: str, args: dict[str, Any] | None, call_id: str | None = None) -> PlanStep:
     args = dict(args or {})
     if name == "done":
@@ -211,34 +301,51 @@ def parse_json_tool_calls(text: str) -> list[tuple[str, dict[str, Any]]]:
     """Parse tool calls a model wrote as JSON text (JSON mode / weak tool support).
 
     Accepts ``{"tool": ..., "args": {...}}``, ``{"name": ..., "arguments": ...}``,
-    a list of those, or ``{"tool_calls": [...]}``.
+    a list of those, ``{"actions": [...]}`` / ``{"tool_calls": [...]}``, and calls
+    nested inside ``args`` (flattened in order, see ``expand_tool_calls``).
     """
     for cand in _json_candidates(text or ""):
         try:
             data = json.loads(cand)
         except json.JSONDecodeError:
             continue
-        if isinstance(data, dict) and isinstance(data.get("tool_calls"), list):
-            data = data["tool_calls"]
+        if isinstance(data, dict) and _call_name(data) is None:
+            batch = next((data[k] for k in _BATCH_KEYS if isinstance(data.get(k), list)), None)
+            if batch is not None:
+                data = batch
         items = data if isinstance(data, list) else [data]
         calls: list[tuple[str, dict[str, Any]]] = []
         for item in items:
             if not isinstance(item, dict):
                 continue
-            fn = item.get("function") if isinstance(item.get("function"), dict) else item
-            name = fn.get("tool") or fn.get("name")
-            args = fn.get("args", fn.get("arguments", fn.get("parameters", {})))
-            if isinstance(name, str) and name in TOOL_NAMES:
-                calls.append((name, parse_arguments(args)))
+            name = _call_name(item)
+            if name is None:
+                continue
+            fn = item.get("function") if isinstance(item.get("function"), dict) else None
+            if fn is not None:
+                args: Any = fn.get("arguments")
+            else:
+                args = next((item[k] for k in _NEST_KEYS if k in item), {})
+                rest = {k: v for k, v in item.items() if k not in ("tool", "name", *_NEST_KEYS)}
+                if rest:
+                    # {"tool": "invoke", "element_id": ...}: arguments at the top level.
+                    args = {**rest, **parse_arguments(args)}
+            calls.extend(expand_tool_calls(name, args))
         if calls:
-            return calls
+            return calls[:MAX_CALLS_PER_REPLY]
     return []
 
 
 def json_mode_instructions(specs: list[dict[str, Any]] | None = None) -> str:
     lines = [
-        "Respond with ONLY a JSON object, no prose:",
+        "Respond with ONLY a JSON object, no prose. One action:",
         '{"tool": "<tool name>", "args": {...}}',
+        "Several actions in order (e.g. pressing several buttons):",
+        (
+            '{"actions": [{"tool": "invoke", "args": {"element_id": "auto:num1Button"}}, '
+            '{"tool": "invoke", "args": {"element_id": "auto:plusButton"}}]}'
+        ),
+        'Never put a tool call inside "args"; "args" holds only that tool\'s arguments.',
         "Available tools (name(args) — description):",
     ]
     for t in specs or TOOL_SPECS:

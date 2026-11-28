@@ -41,8 +41,8 @@ EXPRESSION = "17 + 25"
 TASK = (
     f"Compute {EXPRESSION} in Windows Calculator. First launch(app='calculator', title='Calculator'). "
     "Then invoke each of these element_ids exactly once, in this order (you may send them all "
-    "in one turn): auto:clearButton, auto:num1Button, auto:num7Button, auto:plusButton, "
-    "auto:num2Button, auto:num5Button, auto:equalButton. "
+    "in one turn, one separate invoke call per button): auto:clearButton, auto:num1Button, "
+    "auto:num7Button, auto:plusButton, auto:num2Button, auto:num5Button, auto:equalButton. "
     f"When the display shows {GOLDEN}, call done."
 )
 ALLOW = [

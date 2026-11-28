@@ -74,7 +74,7 @@ def test_example_file_parses_and_builds_chain():
     chain = cfg.build_provider()
     assert isinstance(chain, FallbackProvider) and chain.chain == ["ollama", "null"]
     ollama = chain.providers[0]
-    assert isinstance(ollama, OllamaProvider) and ollama.model == "qwen2.5vl:7b"
+    assert isinstance(ollama, OllamaProvider) and ollama.model == "qwen2.5:7b"
     assert cfg.provider_config("anthropic").api_key_env == "ANTHROPIC_API_KEY"
 
 

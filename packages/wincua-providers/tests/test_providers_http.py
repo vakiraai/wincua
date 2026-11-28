@@ -118,7 +118,7 @@ def test_ollama_text_reply_without_tool_call():
 
 
 def test_ollama_probe_checks_model_is_pulled():
-    t = FakeTransport().add(200, {"models": [{"name": "qwen2.5vl:7b"}]}).add(200, {"models": []})
+    t = FakeTransport().add(200, {"models": [{"name": "qwen2.5:7b"}]}).add(200, {"models": []})
     p = OllamaProvider(transport=t)
     assert run(p.probe())[0] is True
     ok, detail = run(p.probe())
