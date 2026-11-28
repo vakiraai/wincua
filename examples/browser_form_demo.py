@@ -92,7 +92,8 @@ def build_browser_steps(fixture_uri: str, *, browser: str = "msedge", timeout_s:
 def model_task(fixture_uri: str, browser: str) -> str:
     return (
         "Fill in and submit the local test form in the browser.\n"
-        f"1. open_url(url='{fixture_uri}', browser='{browser}', target='{TARGET}').\n"
+        f"1. open_url(url='{fixture_uri}', browser='{browser}', target='{TARGET}'). "
+        "Use open_url for the page, not launch.\n"
         f"2. type(element_id='auto:fullName', text='{NAME_VALUE}').\n"
         f"3. type(element_id='auto:email', text='{EMAIL_VALUE}').\n"
         "4. invoke(element_id='auto:submitButton').\n"

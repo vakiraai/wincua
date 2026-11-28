@@ -354,8 +354,46 @@ def to_plan_steps(name: str, args: Any, call_id: str | None = None) -> list[Plan
     ]
 
 
+_BROWSER_APPS = {
+    "msedge": "msedge", "edge": "msedge", "microsoft edge": "msedge", "microsoftedge": "msedge",
+    "chrome": "chrome", "google chrome": "chrome", "browser": "msedge", "web browser": "msedge",
+}
+_URL_KEYS = ("url", "link", "address", "href", "uri", "page", "file", "path")
+
+
+def browser_launch_as_open_url(args: dict[str, Any]) -> dict[str, Any] | None:
+    """``launch(app='msedge', url=…)`` → ``open_url`` args; None if ``app`` is not a browser.
+
+    Small models often "launch" the browser for a page. Launching the bare
+    executable opens no page (and a fresh profile without accessibility), so the
+    call is turned into ``open_url``; without a URL, open_url reports what is missing.
+    """
+    app = str(args.get("app") or "").strip().strip("\"'").replace("\\", "/").rsplit("/", 1)[-1].lower()
+    browser = _BROWSER_APPS.get(app.removesuffix(".exe"))
+    if browser is None:
+        return None
+    out: dict[str, Any] = {"browser": browser}
+    extra = args.get("args")
+    candidates = [args.get(k) for k in _URL_KEYS]
+    candidates += extra if isinstance(extra, list) else [extra]
+    url = next((str(c).strip() for c in candidates if isinstance(c, str) and _looks_like_url(c)), None)
+    if url:
+        out["url"] = url
+    target = args.get("target") or args.get("title")
+    if target:
+        out["target"] = target
+    return out
+
+
+def _looks_like_url(value: str) -> bool:
+    v = value.strip().lower()
+    return "://" in v or v.startswith(("www.", "file:")) or v.endswith((".html", ".htm"))
+
+
 def to_plan_step(name: str, args: dict[str, Any] | None, call_id: str | None = None) -> PlanStep:
     args = canonical_args(name, dict(args or {}))
+    if name == "launch" and (as_open := browser_launch_as_open_url(args)) is not None:
+        name, args = "open_url", as_open
     if name == "done":
         return PlanStep(kind="done", name="done", args=args, message=args.get("message"), call_id=call_id)
     if name == "abort":

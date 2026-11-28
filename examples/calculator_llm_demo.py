@@ -39,12 +39,14 @@ from _llm_common import (  # noqa: E402
 
 GOLDEN = "42"
 EXPRESSION = "17 + 25"
+BUTTONS = ("clearButton", "num1Button", "num7Button", "plusButton", "num2Button", "num5Button", "equalButton")
 TASK = (
-    f"Compute {EXPRESSION} in Windows Calculator. First launch(app='calculator', title='Calculator'). "
-    "Then invoke each of these element_ids exactly once, in this order (you may send them all "
-    "in one turn, one separate invoke call per button): auto:clearButton, auto:num1Button, "
-    "auto:num7Button, auto:plusButton, auto:num2Button, auto:num5Button, auto:equalButton. "
-    f"When the display shows {GOLDEN}, call done."
+    f"Compute {EXPRESSION} in Windows Calculator in three steps.\n"
+    "Step 1: launch(app='calculator', title='Calculator').\n"
+    "Step 2, all in ONE reply: seven invoke calls, one per button, in this order: "
+    + ", ".join(f"auto:{b}" for b in BUTTONS)
+    + ". Press auto:clearButton only once, as the first of the seven.\n"
+    f"Step 3: when the display shows {GOLDEN}, call done(message='{GOLDEN}')."
 )
 ALLOW = [
     "CalculatorApp.exe",

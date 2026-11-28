@@ -198,6 +198,22 @@ class MockBackend:
             return None
         return ActionResult(ok=False, mode_used="mock", error=self._window_error("Calculator", need))
 
+    def _allow_check(self, name: str, args: dict[str, Any]) -> StructuredError | None:
+        """launch / open_url obey a non-empty allow-list like WindowsBackend (an empty one stays permissive)."""
+        if not self.allow:
+            return None
+        from wincua_driver.backend.windows import check_process_allowed
+
+        if name in ("launch", "app.launch"):
+            app = str(args.get("app") or args.get("exe") or "")
+            return check_process_allowed(app, self.allow) if app else None
+        if name in ("open_url", "browser.open"):
+            preferred = "chrome.exe" if "chrome" in str(args.get("browser") or "").lower() else "msedge.exe"
+            other = "msedge.exe" if preferred == "chrome.exe" else "chrome.exe"
+            denied = check_process_allowed(preferred, self.allow)
+            return denied if denied is not None and check_process_allowed(other, self.allow) is not None else None
+        return None
+
     def _apply_calc_button(self, auto_id: str | None) -> None:
         if not auto_id:
             return
@@ -292,6 +308,8 @@ class MockBackend:
             return blocked
         if isinstance(action, Semantic):
             args = action.args or {}
+            if (denied := self._allow_check(action.name, args)) is not None:
+                return ActionResult(ok=False, mode_used=mode, error=denied)
             if action.name in ("wait", "system.wait", "launch", "app.launch", "focus", "app.focus"):
                 return ActionResult(ok=True, mode_used=mode)
             if action.name in ("open_url", "browser.open"):

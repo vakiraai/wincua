@@ -19,6 +19,7 @@ from wincua_providers.prompting import (
     group_history,
     json_turn_messages,
     orphan_notes,
+    progress_text,
     screenshot_b64,
     user_turn_text,
 )
@@ -83,7 +84,7 @@ class OpenAICompatProvider(HTTPChatProvider):
                     )
             else:
                 messages.extend(json_turn_messages(turn))
-        text = user_turn_text(task, observation, first=not turns, notes=orphan_notes(turns))
+        text = user_turn_text(task, observation, first=not turns, notes=orphan_notes(turns), progress=progress_text(turns))
         if not native:
             text = f"{text}\n\n{JSON_REMINDER}"
         img = screenshot_b64(observation) if self.send_screenshot else None

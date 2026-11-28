@@ -556,6 +556,9 @@ class Agent:
 
             if not finished and recovers:
                 stuck = stuck or guard.end_turn(observation_fingerprint(last_obs), turn_sigs)
+                if not stuck and guard.warning:
+                    history.append({"kind": "guard_note", "turn": turn, "text": guard.warning})
+                    steps.append({"kind": "guard_note", "turn": turn, "text": guard.warning})
                 if stuck:
                     if self._escalate(stuck, turn, steps, history):
                         error_streak = 0
@@ -662,6 +665,14 @@ class Agent:
             return _tool_result("focus", result)
 
         if name in ("open_url", "browser.open"):
+            if not str(args.get("url") or "").strip():
+                return {
+                    "kind": "tool",
+                    "name": "open_url",
+                    "ok": False,
+                    "code": "invalid_args",
+                    "message": "open_url needs url: the page address from the task (launching the browser alone opens no page)",
+                }
             result = await act_fn(
                 semantic_cls(name="open_url", args=args),
                 dry_run=dry_run,

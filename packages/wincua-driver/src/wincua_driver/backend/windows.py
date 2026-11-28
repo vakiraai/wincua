@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Sequence
 from urllib.parse import unquote, urlparse
 
@@ -297,6 +297,42 @@ def resolve_browser_executable(browser: str) -> Path | None:
     if direct.is_file():
         return direct
     return None
+
+
+def check_process_allowed(exe_name: str, allow: Sequence[str]) -> StructuredError | None:
+    """None if ``exe_name`` may be launched or driven under ``allow`` (shared with MockBackend)."""
+    if not allow:
+        return StructuredError(
+            code="allow_list_empty",
+            message=(
+                "Allow-list is empty; refusing desktop action. "
+                "Pass allow=[...] on Agent/Session or WindowsBackend."
+            ),
+            details={"exe": exe_name},
+        )
+    base = PureWindowsPath(exe_name).name.lower()
+    allowed = {PureWindowsPath(a).name.lower() for a in allow}
+    # "msedge" (as a model or MCP client writes it) is the same process as "msedge.exe".
+    bare = {a.removesuffix(".exe") for a in allowed}
+    if base in allowed or exe_name.lower() in allowed or (not PureWindowsPath(base).suffix and base in bare):
+        return None
+    # Protocol / AUMID launches for Calculator
+    if is_calculator_app(exe_name) and any(
+        a in allowed
+        for a in (
+            "calc.exe",
+            "calculatorapp.exe",
+            "applicationframehost.exe",
+            "calculator:",
+            "calculator",
+        )
+    ):
+        return None
+    return StructuredError(
+        code="allow_list_denied",
+        message=f"Process {base!r} is not on the session allow-list.",
+        details={"exe": base, "allow": list(allow)},
+    )
 
 
 def is_calculator_app(app: str) -> bool:
@@ -900,36 +936,7 @@ class WindowsBackend:
         return f"{safe}_{self._id_seq}"
 
     def _check_process_allowed(self, exe_name: str) -> StructuredError | None:
-        if not self.allow:
-            return StructuredError(
-                code="allow_list_empty",
-                message=(
-                    "Allow-list is empty; refusing desktop action. "
-                    "Pass allow=[...] on Agent/Session or WindowsBackend."
-                ),
-                details={"exe": exe_name},
-            )
-        base = Path(exe_name).name.lower()
-        allowed = {Path(a).name.lower() for a in self.allow}
-        if base in allowed or exe_name.lower() in allowed:
-            return None
-        # Protocol / AUMID launches for Calculator
-        if is_calculator_app(exe_name) and any(
-            a in allowed
-            for a in (
-                "calc.exe",
-                "calculatorapp.exe",
-                "applicationframehost.exe",
-                "calculator:",
-                "calculator",
-            )
-        ):
-            return None
-        return StructuredError(
-            code="allow_list_denied",
-            message=f"Process {base!r} is not on the session allow-list.",
-            details={"exe": base, "allow": list(self.allow)},
-        )
+        return check_process_allowed(exe_name, self.allow)
 
     def _desktop(self) -> Any:
         from pywinauto import Desktop

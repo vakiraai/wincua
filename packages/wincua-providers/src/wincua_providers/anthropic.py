@@ -22,6 +22,7 @@ from wincua_providers.prompting import (
     clean_args,
     group_history,
     orphan_notes,
+    progress_text,
     png_size,
     screenshot_png,
     user_turn_text,
@@ -164,7 +165,7 @@ class AnthropicProvider(HTTPChatProvider):
             messages.append({"role": "user", "content": results})
 
         obs_blocks: list[dict[str, Any]] = [
-            {"type": "text", "text": user_turn_text(task, observation, first=not turns, notes=orphan_notes(turns))}
+            {"type": "text", "text": user_turn_text(task, observation, first=not turns, notes=orphan_notes(turns), progress=progress_text(turns))}
         ]
         img = self._prepare_screenshot(observation)
         if img:
