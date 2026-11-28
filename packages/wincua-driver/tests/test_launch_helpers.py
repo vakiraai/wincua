@@ -6,6 +6,8 @@ from wincua_driver.backend.windows import (
     calculator_launch_strategies,
     is_calculator_app,
     match_window_title,
+    normalize_title_text,
+    page_title_segment,
     resolve_browser_executable,
 )
 
@@ -14,9 +16,15 @@ def test_match_window_title_substring_and_exact():
     assert match_window_title("Calculator", "Calculator")
     assert match_window_title("My Calculator - untitled", "Calculator")
     assert match_window_title("wincua form demo — submitted", "wincua form demo")
+    edge = "wincua form demo - Profile 1 - Microsoft\u200b Edge"
+    assert match_window_title(edge, "wincua form demo")
+    assert match_window_title(edge, "Microsoft Edge")
+    assert page_title_segment(edge) == "wincua form demo"
+    assert normalize_title_text(edge).endswith("Microsoft Edge")
     assert not match_window_title("", "Calculator")
     assert not match_window_title("Notepad", "Calculator")
     assert not match_window_title("Settings", "Calculator")
+    assert not match_window_title("README.md - WinCua - Visual Studio Code", "wincua form demo")
 
 
 def test_is_calculator_app_aliases():

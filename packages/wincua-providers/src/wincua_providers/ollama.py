@@ -13,6 +13,7 @@ from wincua_providers.prompting import (
     group_history,
     json_turn_messages,
     orphan_notes,
+    progress_text,
     screenshot_b64,
     user_turn_text,
 )
@@ -115,7 +116,7 @@ class OllamaProvider(HTTPChatProvider):
                     messages.append({"role": "tool", "tool_name": c.name, "content": c.result})
             else:
                 messages.extend(json_turn_messages(turn))
-        content = user_turn_text(task, observation, first=not turns, notes=orphan_notes(turns))
+        content = user_turn_text(task, observation, first=not turns, notes=orphan_notes(turns), progress=progress_text(turns))
         if not native:
             content = f"{content}\n\n{JSON_REMINDER}"
         final: dict[str, Any] = {"role": "user", "content": content}

@@ -223,6 +223,8 @@ async def main(argv: list[str] | None = None) -> int:
     for step in result.steps:
         if step.get("kind") in {"tool", "error", "done", "abort"}:
             print(f"  - {step}")
+    if result.recording_path:
+        print(f"  recording: {result.recording_path}")
     return 0 if result.ok else 2
 
 

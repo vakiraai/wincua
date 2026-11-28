@@ -90,6 +90,8 @@ def print_run(agent: Any, result: Any) -> None:
                 how = "retried" if info.get("retried") else f"{info['fallback']} fallback"
                 status += f" ({how} after {info.get('invoke_error')})"
             print(f"      -> {step.get('name')}: {status}")
+        elif kind == "guard_note":
+            print(f"  LOOP WARNING (sent to the model): {step['text']}")
         elif kind == "escalate":
             print(f"  ESCALATE: {step['reason']} -> {step.get('to') or 'stop'}")
         elif kind == "resume":

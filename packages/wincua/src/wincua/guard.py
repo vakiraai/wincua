@@ -39,10 +39,13 @@ def normalize_model_args(
     """
     out = {k: v for k, v in args.items() if v not in (None, "") and k not in ("role", "tool")}
     if "target" in out:
-        titles = {str(current_target or "").lower()}
+        from wincua_driver.backend.windows import match_window_title
+
+        want = str(out["target"])
+        observed = [str(current_target or "")]
         app = getattr(observation, "app", None) or {}
-        titles |= {str(app.get(k) or "").lower() for k in ("title", "target")}
-        if str(out["target"]).lower() not in titles - {""}:
+        observed.extend(str(app.get(k) or "") for k in ("title", "target", "page"))
+        if not any(t and match_window_title(t, want) for t in observed if t):
             out.pop("target")
     if tool not in ELEMENT_TOOLS:
         return out
@@ -118,6 +121,7 @@ class LoopGuard:
         self._repeats = 0
         self._failures = 0
         self._last_failed: str | None = None
+        self.warning: str | None = None
 
     def record_action(self, signature: str, ok: bool) -> str | None:
         if ok:
@@ -130,6 +134,7 @@ class LoopGuard:
         return None
 
     def end_turn(self, fingerprint: str, signatures: list[str]) -> str | None:
+        self.warning = None
         if not signatures:
             return None
         key = tuple(signatures)
@@ -139,6 +144,15 @@ class LoopGuard:
         else:
             self._repeats, self._screen_changed = 1, False
         self._last_turn, self._last_fingerprint = key, fingerprint
+        if self._repeats == self.repeat_limit - 1:
+            # A temperature-0 model sent the same prompt answers the same way: change the
+            # prompt once (see Agent) before the next repeat escalates.
+            shown = ", ".join(signatures[:4]) + (", …" if len(signatures) > 4 else "")
+            self.warning = (
+                f"You sent the same actions {self._repeats} turns in a row ({shown}) and they already ran. "
+                "Do not send them again: send the next step of the task, or done if its result is "
+                "already visible. Repeating them once more stops the run."
+            )
         if self._repeats >= self.repeat_limit:
             screen = "" if self._screen_changed else " without changing the screen"
             shown = ", ".join(signatures[:4]) + (", …" if len(signatures) > 4 else "")

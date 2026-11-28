@@ -121,11 +121,13 @@ def window_origin(observation: Any) -> tuple[int, int]:
     return 0, 0
 
 
-def user_turn_text(task: str, observation: Any, *, first: bool, notes: Sequence[str] = ()) -> str:
+def user_turn_text(
+    task: str, observation: Any, *, first: bool, notes: Sequence[str] = (), progress: str = ""
+) -> str:
     obs = observation_text(observation)
     head = f"Task: {task}" if first else ""
     head = "\n".join([head, *notes]).strip()
-    tail = "" if first else f"\n\nContinue the task: {task}"
+    tail = "" if first else f"\n\n{progress + chr(10) if progress else ''}Continue the task: {task}"
     prefix = f"{head}\n\n" if head else ""
     return f"{prefix}Current observation:\n{obs}{tail}"
 
@@ -211,7 +213,7 @@ def group_history(
 def history_note(entry: dict[str, Any]) -> str:
     kind = entry.get("kind")
     name = entry.get("name")
-    if kind == "escalation":
+    if kind in ("escalation", "guard_note"):
         return str(entry.get("text"))
     if kind == "human_instruction":
         return f"Human instruction: {entry.get('text')}"
@@ -225,6 +227,33 @@ def history_note(entry: dict[str, Any]) -> str:
 
 def orphan_notes(turns: Sequence[Turn]) -> list[str]:
     return [n for t in turns for n in t.notes]
+
+
+MAX_PROGRESS_CALLS = 24
+
+
+def progress_text(turns: Sequence[Turn]) -> str:
+    """The actions that already succeeded, in order, so a model restating the task does not start over.
+
+    Small models re-read the whole task every turn and begin again at its first
+    step (e.g. pressing Clear forever); this line tells them where they are.
+    """
+    done = [c for t in turns for c in t.calls if c.result.startswith("ok")]
+    if not done:
+        return ""
+    shown = done[-MAX_PROGRESS_CALLS:]
+    skipped = len(done) - len(shown)
+    items = "; ".join(f"{c.name}({_call_args_text(c.args)})" for c in shown)
+    more = f"(and {skipped} earlier) " if skipped else ""
+    return (
+        f"Already succeeded, in order: {more}{items}.\n"
+        "Do not start over: send the steps that come after these, or done if the result is visible."
+    )
+
+
+def _call_args_text(args: dict[str, Any]) -> str:
+    keep = {k: v for k, v in clean_args(args).items() if k not in {"target", "auto_id", "name", "timeout_s"}}
+    return ", ".join(f"{k}={json.dumps(v, ensure_ascii=False, default=str)}" for k, v in keep.items())[:160]
 
 
 NUDGE = "Reply with a tool call (or done / abort / ask_human)."

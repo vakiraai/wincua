@@ -155,7 +155,41 @@ class Agent:
 
         Demos can pass ``ScriptedProvider`` so no LLM is required.
         On non-Windows, selecting the windows backend fails with a clear error.
+        With ``recorder=True`` every step (observation summary, raw model reply,
+        parsed actions, tool results, human answers, errors) is appended to
+        ``recordings/<session>.jsonl`` as it happens, ending with a ``result`` line.
         """
+        session = Session(
+            allow=list(self.allow),
+            mode=self.mode,
+            recorder=self.recorder,
+            hitl=self.hitl,
+            provider=self.provider,
+        )
+        await session.start()
+        steps = _RecordedSteps(session.record)
+        steps.append(
+            {
+                "kind": "session_start",
+                "session_id": session.session_id,
+                "provider": self.provider_name,
+                "mode": self.mode,
+                "backend": self.backend,
+                "observe_target": self.observe_target,
+                "max_turns": self.max_turns,
+            }
+        )
+        steps.append({"kind": "task", "task": self.task})
+        try:
+            result = await self._run(session, steps)
+        except BaseException as exc:
+            session.record({"kind": "crash", "error": f"{type(exc).__name__}: {exc}"})
+            raise
+        session.record({"kind": "result", "ok": result.ok, "message": result.message})
+        result.recording_path = session.recording_path
+        return result
+
+    async def _run(self, session: Session, steps: list[dict[str, Any]]) -> AgentResult:
         from wincua_driver import (
             Click,
             Invoke,
@@ -166,19 +200,6 @@ class Agent:
             observe,
         )
         from wincua_providers.base import PlanStep
-
-        session = Session(
-            allow=list(self.allow),
-            mode=self.mode,
-            recorder=self.recorder,
-            hitl=self.hitl,
-            provider=self.provider,
-        )
-        await session.start()
-        steps: list[dict[str, Any]] = [
-            {"kind": "session_start", "session_id": session.session_id},
-            {"kind": "task", "task": self.task},
-        ]
 
         try:
             self._ensure_backend()
@@ -213,6 +234,17 @@ class Agent:
                     "errors": [e.code for e in obs.errors],
                 }
             )
+            session.record(
+                {
+                    "kind": "observation",
+                    "turn": turn,
+                    "elements": [
+                        {"id": el.element_id, "role": el.role, "name": el.name, "auto_id": el.auto_id}
+                        for el in obs.uia[:_RECORDED_ELEMENTS]
+                    ],
+                    "errors": [{"code": e.code, "message": getattr(e, "message", None)} for e in obs.errors],
+                }
+            )
 
             plan = await self.provider.plan(
                 task=self.task,
@@ -231,6 +263,7 @@ class Agent:
                     ],
                     "error": plan.error,
                     "text": plan.text,
+                    "raw": plan.raw,
                 }
             )
             recovers = bool(getattr(self.provider, "recovers_from_errors", False))
@@ -457,11 +490,16 @@ class Agent:
                 )
                 if by_human:
                     result_record["by"] = "human"
-                steps.append(result_record)
-                if result_record.get("detail") and (self.recorder or by_human):
+                result_record.setdefault("args", args)
+                result_record["turn"] = turn
+                logged = bool(result_record.get("detail") and (self.recorder or by_human))
+                if logged:
                     result_record["detail_log"] = _write_detail(
-                        session.session_id, turn, tool_name, result_record.pop("detail")
+                        session.session_id, turn, tool_name, result_record["detail"]
                     )
+                steps.append(result_record)
+                if logged:
+                    result_record.pop("detail")
                 entry["result"] = {
                     k: result_record[k]
                     for k in ("ok", "code", "message", "hint", "display", "info")
@@ -507,7 +545,17 @@ class Agent:
                         break
                 error_streak = 0
                 # Allow scripts to retarget observe
-                if tool_name in ("observe", "focus", "launch", "open_url") and args.get(
+                if tool_name == "open_url" and result_record.get("ok"):
+                    info = result_record.get("info") or {}
+                    target = str(
+                        args.get("target")
+                        or info.get("bound_target")
+                        or info.get("page")
+                        or info.get("document")
+                        or info.get("title")
+                        or target
+                    )
+                elif tool_name in ("observe", "focus", "launch", "open_url") and args.get(
                     "target"
                 ):
                     target = str(args["target"])
@@ -518,6 +566,9 @@ class Agent:
 
             if not finished and recovers:
                 stuck = stuck or guard.end_turn(observation_fingerprint(last_obs), turn_sigs)
+                if not stuck and guard.warning:
+                    history.append({"kind": "guard_note", "turn": turn, "text": guard.warning})
+                    steps.append({"kind": "guard_note", "turn": turn, "text": guard.warning})
                 if stuck:
                     if self._escalate(stuck, turn, steps, history):
                         error_streak = 0
@@ -624,6 +675,14 @@ class Agent:
             return _tool_result("focus", result)
 
         if name in ("open_url", "browser.open"):
+            if not str(args.get("url") or "").strip():
+                return {
+                    "kind": "tool",
+                    "name": "open_url",
+                    "ok": False,
+                    "code": "invalid_args",
+                    "message": "open_url needs url: the page address from the task (launching the browser alone opens no page)",
+                }
             result = await act_fn(
                 semantic_cls(name="open_url", args=args),
                 dry_run=dry_run,
@@ -781,6 +840,21 @@ class Agent:
             "message": message,
             "app": obs.app,
         }
+
+
+_RECORDED_ELEMENTS = 200
+
+
+class _RecordedSteps(list):
+    """``steps`` list that also appends each new step to the session recording."""
+
+    def __init__(self, record: Any) -> None:
+        super().__init__()
+        self._record = record
+
+    def append(self, step: dict[str, Any]) -> None:
+        super().append(step)
+        self._record(step)
 
 
 def _write_detail(session_id: str | None, turn: int, tool: str, text: str) -> str | None:
