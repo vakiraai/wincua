@@ -154,6 +154,37 @@ include `UIA_E_ELEMENTNOTAVAILABLE` (0x80040201, shown as "An event was
 unable to invoke any of the subscribers"), element-not-enabled, no clickable
 point, UIA timeout and RPC disconnected/busy.
 
+**Window-state checks.** Before an action, the Windows driver checks the
+target's top-level window. It returns a structured error instead of typing
+or clicking into another window:
+
+| Code | When | Checked for |
+| --- | --- | --- |
+| `window_minimized` | `IsIconic` | every action |
+| `window_hidden` | not `IsWindowVisible` | every action |
+| `window_cloaked` | DWM cloaked (another virtual desktop, suspended app) | every action |
+| `target_offscreen` | window on no monitor; click point off-monitor or outside the window | every action / clicks |
+| `window_not_foreground` | another window is in the foreground | `type`, `key`, clicks |
+| `target_obscured` | `WindowFromPoint` at the click point is another window (not a child or owned popup) | clicks |
+
+UIA Invoke works on a background or covered window, so `invoke` does not
+need the foreground. If Invoke fails and the driver would fall back to a
+click, it checks the click point first. `observe` reports the first four
+codes in `errors` without failing.
+
+On a failed check the driver restores and focuses the window once, then
+checks again. If that fixes it, the action runs and its `info` carries
+`window_recovered: [code]`. Otherwise it fails with the code, the window
+title, details such as the covering window, and a `hint` saying how to
+recover. Set `WINCUA_AUTO_FOCUS=0` (or `WindowsBackend(auto_focus=False)`)
+to fail right away with no focus change. `focus` itself fails with
+`window_not_foreground` when Windows blocks the focus change.
+
+The model sees `FAILED: [code] message; hint: …`. MCP `act` returns
+`error.code` and `error.hint`. The HITL card and terminal show the hint
+under each observation error, and a human's failed action comes back as
+`Last action … failed [code]: … Hint: …`.
+
 ## `[driver]`
 
 ```toml

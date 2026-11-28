@@ -28,6 +28,7 @@ class StructuredError:
     code: str
     message: str
     details: dict[str, Any] = field(default_factory=dict)
+    hint: str = ""  # how a model or human can recover (e.g. "call focus, then retry")
 
 
 @dataclass

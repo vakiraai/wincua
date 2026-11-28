@@ -159,8 +159,11 @@ def result_text(entry: dict[str, Any]) -> str:
     if res is None:
         return "not executed"
     parts = ["ok" if res.get("ok", True) else "FAILED"]
-    if res.get("message"):
-        parts.append(str(res["message"]))
+    if res.get("message") or res.get("code"):
+        code = f"[{res['code']}] " if res.get("code") else ""
+        parts.append(f"{code}{res.get('message') or ''}".strip())
+    if res.get("hint"):
+        parts.append(f"hint: {res['hint']}")
     for key in ("display", "info"):
         if res.get(key):
             parts.append(f"{key}={json.dumps(res[key], ensure_ascii=False, default=str)[:300]}")

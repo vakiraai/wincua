@@ -120,6 +120,8 @@ class CliUI(HitlTransport):
             self._print("app: " + ", ".join(f"{k}={v}" for k, v in obs["app"].items()))
         for err in obs.get("errors") or []:
             self._print(f"! {err.get('code')}: {err.get('message')}")
+            if err.get("hint"):
+                self._print(f"  hint: {err['hint']}")
         shot = self._save_shot(req)
         if shot:
             self._print(f"screenshot: {shot}")

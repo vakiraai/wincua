@@ -22,6 +22,23 @@ from wincua_driver.types import (
     StructuredError,
     Type,
 )
+from wincua_driver.window_state import (
+    TARGET_OBSCURED,
+    TARGET_OFFSCREEN,
+    WINDOW_CLOAKED,
+    WINDOW_HIDDEN,
+    WINDOW_MINIMIZED,
+    WINDOW_NOT_FOREGROUND,
+    window_error,
+)
+
+_WINDOW_LEVEL = frozenset({WINDOW_MINIMIZED, WINDOW_HIDDEN, WINDOW_CLOAKED, TARGET_OFFSCREEN})
+_NEEDS: dict[str, frozenset[str]] = {
+    "observe": _WINDOW_LEVEL,
+    "pattern": _WINDOW_LEVEL,
+    "keyboard": _WINDOW_LEVEL | {WINDOW_NOT_FOREGROUND},
+    "pointer": _WINDOW_LEVEL | {WINDOW_NOT_FOREGROUND, TARGET_OBSCURED},
+}
 
 FORM_TITLE = "wincua form demo"
 FORM_FIELDS: dict[str, str] = {"fullName": "Full name", "email": "Email"}
@@ -40,6 +57,11 @@ class MockBackend:
         self.form_result: str = ""
         self.form_title: str = FORM_TITLE
         self._form_focus: str | None = None
+        # Simulated window state (window_minimized, target_obscured, …): input
+        # actions that need it fail like WindowsBackend's preflight. ``focus``
+        # clears it unless sticky (an always-on-top window focus cannot fix).
+        self.window_issue: str | None = None
+        self.window_issue_sticky: bool = False
 
     def set_allow(self, allow: Sequence[str]) -> None:
         self.allow = list(allow)
@@ -124,6 +146,9 @@ class MockBackend:
             )
             if self.form_result:
                 uia.append(ElementRef(element_id="result_text", role="Text", name=self.form_result))
+        errors = []
+        if self.window_issue in _NEEDS["observe"]:
+            errors.append(self._window_error(target or "Mock", "observe"))
         if "screenshot" in include:
             screenshot = ImageRef(path=None, data=b"", capture_quality="full")
         if "app" in include:
@@ -143,7 +168,35 @@ class MockBackend:
                     "target": target,
                     "title": target or "Mock",
                 }
-        return Observation(uia=uia, screenshot=screenshot, app=app)
+        return Observation(uia=uia, screenshot=screenshot, app=app, errors=errors)
+
+    def _window_error(self, title: str, need: str) -> StructuredError:
+        assert self.window_issue is not None
+        return window_error(
+            self.window_issue,
+            f"Window {title!r}: simulated {self.window_issue}.",
+            {"title": title, "need": need, "auto_focus": True},
+        )
+
+    def _window_check(self, action: Action) -> ActionResult | None:
+        """Fail an input action the way WindowsBackend's preflight would."""
+        from wincua_driver.types import Semantic
+
+        if self.window_issue is None:
+            return None
+        if isinstance(action, Semantic):
+            if action.name in ("focus", "app.focus", "launch", "app.launch"):
+                if not self.window_issue_sticky:
+                    self.window_issue = None
+                return None
+            need = {"uia.invoke": "pattern", "invoke_by": "pattern", "uia.type": "keyboard", "type_by": "keyboard"}.get(
+                action.name
+            )
+        else:
+            need = {Invoke: "pattern", Type: "keyboard", Key: "keyboard", Click: "pointer"}.get(type(action))
+        if need is None or self.window_issue not in _NEEDS[need]:
+            return None
+        return ActionResult(ok=False, mode_used="mock", error=self._window_error("Calculator", need))
 
     def _apply_calc_button(self, auto_id: str | None) -> None:
         if not auto_id:
@@ -235,6 +288,8 @@ class MockBackend:
         mode = "dry-run" if dry_run else "mock"
         if dry_run:
             return ActionResult(ok=True, mode_used=mode)
+        if (blocked := self._window_check(action)) is not None:
+            return blocked
         if isinstance(action, Semantic):
             args = action.args or {}
             if action.name in ("wait", "system.wait", "launch", "app.launch", "focus", "app.focus"):
@@ -282,6 +337,8 @@ class MockBackend:
                 self._submit_form()
             return ActionResult(ok=True, mode_used=mode)
         if isinstance(action, Click):
+            if (action.element_id or "").startswith("auto:"):
+                self._apply_calc_button(action.element_id[5:])
             if self._is_submit(action.element_id):
                 self._submit_form()
             elif (field := self._field_for(action.element_id)) is not None:
