@@ -186,6 +186,13 @@ it closes demo windows left by the previous one (`--keep-windows` skips this).
 It kills a run after `--run-timeout` seconds (default 300). `-v` echoes each
 demo's output.
 
+Every demo run also writes `recordings\<session>.jsonl` (the demo prints its path
+as `recording:`). It has one JSON line per step, written as it happens: the
+observation summary (elements, errors), each model reply (`raw` and `text`) with
+the parsed actions, each tool's args, result and full driver error, human
+answers, and a final `result` line (or `crash`). When a run fails, send that
+file together with the run's log.
+
 ### Without a Windows desktop (CI / Linux / macOS)
 
 ```bash

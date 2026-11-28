@@ -134,7 +134,10 @@ def test_scripted_mock_runs_meet_gate_and_write_reports(workdir, capsys):
     assert [Path(r["command"][1]).name for r in report["runs"]] == ["browser_form_demo.py"] * 2 + ["calculator_arith_demo.py"] * 2
     for r in report["runs"]:
         assert r["status"] == "PASS" and r["duration_s"] > 0 and Path(r["log"]).is_file()
-        assert r["recordings"] and r["recordings"][0]["path"].startswith("recordings")
+        (rec,) = [x for x in r["recordings"] if x["path"].endswith(".jsonl")]
+        assert rec["exists"], rec
+        kinds = [json.loads(ln)["kind"] for ln in (workdir / rec["path"]).read_text(encoding="utf-8").splitlines()]
+        assert kinds[0] == "session_start" and kinds[-1] == "result" and "tool" in kinds
     md = (out / "report.md").read_text(encoding="utf-8")
     assert "**MEETS GATE**" in md and "| browser | 2/2 | 100% | meets |" in md
 
@@ -153,6 +156,18 @@ def test_provider_defaults_to_config_and_one_failure_in_five_still_meets_gate(wo
     failed = report["runs"][2]
     assert failed["exit_code"] == 2 and "model gave up" in failed["reason"]
     assert "qwen2.5vl:7b" in Path(failed["log"]).read_text(encoding="utf-8")
+    (rec,) = [x for x in failed["recordings"] if x["path"].endswith(".jsonl") and x["exists"]]
+    lines = [json.loads(ln) for ln in (workdir / rec["path"]).read_text(encoding="utf-8").splitlines()]
+    plans = [ln for ln in lines if ln["kind"] == "plan"]
+    assert plans and plans[0]["raw"]["model"] == "qwen2.5vl:7b" and "model gave up" in plans[0]["raw"]["message"]["content"]
+    assert plans[0]["plan_steps"][0]["kind"] == "abort"
+    assert lines[-1]["kind"] == "result" and lines[-1]["ok"] is False
+    passed = report["runs"][0]
+    (rec,) = [x for x in passed["recordings"] if x["path"].endswith(".jsonl")]
+    lines = [json.loads(ln) for ln in (workdir / rec["path"]).read_text(encoding="utf-8").splitlines()]
+    tools = [ln for ln in lines if ln["kind"] == "tool"]
+    assert [t["name"] for t in tools] == ["open_url", "type", "type", "invoke"] and all(t["ok"] for t in tools)
+    assert lines[-1] == {**lines[-1], "kind": "result", "ok": True}
     assert "4/5 passed = 80%" in text and "gate 80%: PASS" in text
 
 
