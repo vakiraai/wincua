@@ -159,6 +159,7 @@ browser form prompt and more are in [packages/wincua-mcp/README.md](packages/win
 | Behind a proxy: pip or `ollama pull` can't download | pip: `$env:HTTPS_PROXY = "http://proxy:8080"` before installing (or `--proxy`). Ollama downloads in its own server process: set `HTTPS_PROXY` as a user environment variable, quit Ollama from the tray and start it again |
 | Behind a proxy: wincua can't reach Ollama | Requests to `127.0.0.1` / `localhost` already skip the proxy. For Ollama on another machine, add its host to `NO_PROXY` |
 | `HOST-WINDOWS-ONLY: ...` | Not running on Windows; use `--mock` |
+| A step fails with `window_minimized`, `window_not_foreground`, `target_obscured` (or `window_hidden` / `window_cloaked` / `target_offscreen`) | The driver already tried restoring and focusing the window once, then stopped rather than type into another window. Keep the demo window visible and in front, close whatever covers it, stay on the same virtual desktop, and don't click elsewhere during the run. Details: "Window-state checks" in [docs/config.md](docs/config.md) |
 | `import pywinauto` fails | See [Launch / import troubleshooting](#launch--import-troubleshooting) |
 | `golden ...: FAIL` | Attach the `recordings/browser-form-*-uia.txt` the demo names, plus its output |
 
