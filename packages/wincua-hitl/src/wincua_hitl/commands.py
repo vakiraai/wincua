@@ -30,12 +30,14 @@ def parse_command(text: str) -> dict[str, Any] | None:
     rest = rest.strip()
 
     if verb in ("invoke", "press") and rest:
-        return {"tool": "invoke", "args": {"element_id": rest}}
+        eid = _element_id(rest)
+        return {"tool": "invoke", "args": {"element_id": eid}} if eid else None
     if verb == "click" and rest:
         parts = rest.split()
         if len(parts) == 2 and all(_is_int(p) for p in parts):
             return {"tool": "click", "args": {"x": int(parts[0]), "y": int(parts[1])}}
-        return {"tool": "click", "args": {"element_id": rest}}
+        eid = _element_id(rest)
+        return {"tool": "click", "args": {"element_id": eid}} if eid else None
     if verb == "type" and rest:
         if rest.startswith("@"):
             eid, _, body = rest[1:].partition(" ")
@@ -55,6 +57,15 @@ def parse_command(text: str) -> dict[str, Any] | None:
         return {"tool": "focus", "args": {"title": rest}}
     if verb == "observe":
         return {"tool": "observe", "args": {"target": rest} if rest else {}}
+    return None
+
+
+def _element_id(rest: str) -> str | None:
+    """One token, a quoted name, or ``name:<text>``; other prose ("press 4, then 2") is an instruction."""
+    if rest[0] in "\"'":
+        return _unquote(rest) or None
+    if rest.lower().startswith("name:") or " " not in rest:
+        return rest
     return None
 
 

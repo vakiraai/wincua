@@ -172,3 +172,11 @@ def test_chain_with_unknown_part_is_rejected_clearly():
 def test_type_line_is_not_split():
     resp = interpret_text("type a;b|c", _win_req())
     assert resp.action == {"tool": "type", "args": {"text": "a;b|c"}} and resp.actions is None
+
+
+def test_prose_after_an_element_verb_is_not_a_command():
+    assert parse_command("press 4, then 2") is None
+    assert parse_command("click the plus button") is None
+    assert parse_command('invoke "Square root"') == {"tool": "invoke", "args": {"element_id": "Square root"}}
+    assert parse_command("invoke name:Submit form") == {"tool": "invoke", "args": {"element_id": "name:Submit form"}}
+    assert parse_command("press one") == {"tool": "invoke", "args": {"element_id": "one"}}

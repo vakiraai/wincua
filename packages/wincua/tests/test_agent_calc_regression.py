@@ -344,3 +344,26 @@ def test_terminal_prompt_fails_closed_without_a_tty():
     assert asyncio.run(ask_on_terminal("q?", stdin=_TTY("  press 4 \n"), stdout=out)) == "press 4"
     assert "[wincua] q?" in out.getvalue()
     assert [classify_answer(a) for a in ("Done.", "q", "press 4")] == ["done", "abort", "instruction"]
+
+
+def test_null_with_hitl_ui_hands_a_free_text_hint_back_to_the_model(backend):
+    from wincua_hitl import HitlTransport, HumanResponse
+
+    class Human(HitlTransport):
+        def __init__(self):
+            super().__init__()
+            self.seen = []
+
+        async def _exchange(self, req, timeout_s):
+            self.seen.append(req)
+            return HumanResponse(kind="instruction", text="press 4, then 2")
+
+    human = Human()
+    replies = [(200, ollama_tool_reply(_invoke("auto:num1Button"))) for _ in range(3)] + [
+        (200, ollama_tool_reply(("done", {"message": "handed back"}))),
+    ]
+    agent, result, t = run_replies(replies, hitl=human)
+    assert result.ok and result.message == "handed back"
+    assert [r.kind for r in human.seen] == ["next_step"]
+    assert next(s for s in result.steps if s["kind"] == "resume")["to"] == "ollama"
+    assert "press 4, then 2" in str(t.requests[-1].body["messages"])
