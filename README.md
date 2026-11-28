@@ -228,7 +228,7 @@ PyPI check (Nov 2026): `pywin32==312` ships `pywin32-312-cp315-cp315-win_amd64.w
 | `wincua-hitl` | `wincua_hitl` | Local HITL UI (`ui` / `cli` / `off`) + `ask_human` / `confirm_action` |
 | `wincua-mcp` | `wincua_mcp` | MCP server (`wincua-mcp`) |
 | `wincua-excel` | — | Post-MVP pack (stub) |
-| `wincua-slicer` | — | Phase 2 pack (stub) |
+| `wincua-slicer` | `[slicer]` | Phase 2 — Slicer API helpers + `examples/slicer_open_volume_demo.py` |
 
 ## Install
 
