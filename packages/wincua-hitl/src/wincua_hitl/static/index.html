@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>wincua · human in the loop</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">◧</span> wincua <span class="muted">human in the loop</span></div>
+    <div class="status"><span id="conn" class="dot"></span><span id="conn-text">connecting…</span></div>
+  </header>
+
+  <main class="layout">
+    <section class="panel shot-panel">
+      <div class="panel-head">
+        <h2>Screen</h2>
+        <span id="capture" class="chip"></span>
+      </div>
+      <div id="shot-wrap" class="shot-wrap">
+        <img id="shot" alt="Agent screenshot" hidden>
+        <div id="shot-empty" class="empty">No screenshot for this step.</div>
+      </div>
+      <details class="obs" open>
+        <summary>Observation <span id="obs-count" class="muted"></span></summary>
+        <div id="obs-app" class="kv"></div>
+        <div id="obs-errors"></div>
+        <input id="obs-filter" class="input small" placeholder="Filter elements by name, role or id">
+        <div class="table-wrap">
+          <table id="obs-table">
+            <thead><tr><th>id</th><th>role</th><th>name</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
+    </section>
+
+    <section class="panel side">
+      <div id="idle" class="card idle">
+        <div class="spinner"></div>
+        <h3>Waiting for the agent</h3>
+        <p class="muted">When the agent needs you, its question or proposed action shows up here.</p>
+      </div>
+
+      <div id="req" class="card" hidden>
+        <div class="req-head">
+          <span id="req-kind" class="badge"></span>
+          <span id="req-timer" class="muted"></span>
+        </div>
+        <p id="req-task" class="task"></p>
+        <h3 id="req-question"></h3>
+        <p id="req-reason" class="reason" hidden></p>
+        <pre id="req-action" class="action" hidden></pre>
+
+        <div id="opts" class="opts"></div>
+
+        <div id="confirm-row" class="row" hidden>
+          <button id="btn-approve" class="btn ok">Approve</button>
+          <button id="btn-reject" class="btn danger">Reject</button>
+        </div>
+
+        <form id="instr-form" class="instr" hidden>
+          <label id="instr-label" for="instr">Instruction</label>
+          <div class="row">
+            <input id="instr" class="input" autocomplete="off" placeholder="e.g. One · invoke auto:num1Button · type 23 · key enter">
+            <button class="btn primary" type="submit">Send</button>
+          </div>
+          <p id="instr-help" class="hint muted"></p>
+        </form>
+
+        <div id="suggest-wrap" hidden>
+          <h4>Next action</h4>
+          <input id="suggest-filter" class="input small" placeholder="Filter actions">
+          <div id="suggest" class="grid"></div>
+        </div>
+
+        <div id="control-row" class="row controls">
+          <button id="btn-takeover" class="btn">Take over</button>
+          <button id="btn-resume" class="btn primary" hidden>Resume agent</button>
+          <button id="btn-done" class="btn">Mark done</button>
+          <button id="btn-abort" class="btn danger ghost">Abort</button>
+        </div>
+        <p id="req-error" class="error" hidden></p>
+      </div>
+
+      <div class="card">
+        <h4>Recent</h4>
+        <ol id="history" class="history"></ol>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

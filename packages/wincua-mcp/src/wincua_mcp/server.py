@@ -419,6 +419,7 @@ def build_server(
                 runtime.hitl,
                 f"{risk} in window {resolved!r}",
                 timeout_s=settings.confirm_timeout_s,
+                action=built,
             )
             out["confirmation"] = {"approved": decision.approved, "answer": decision.answer, "hitl": decision.hook}
             if not decision.approved:

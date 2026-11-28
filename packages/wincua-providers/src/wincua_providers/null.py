@@ -8,7 +8,11 @@ from wincua_providers.base import PlanStep, ProviderResult
 
 
 class NullProvider:
-    """No model. Agent must not rewrite the task — use HITL instead."""
+    """No model. Agent must not rewrite the task — use HITL instead.
+
+    Every turn asks the human for the next step (``mode="next_step"``): the
+    human picks an action, types a command, takes over, or ends the task.
+    """
 
     name = "null"
 
@@ -27,8 +31,9 @@ class NullProvider:
                     kind="ask_human",
                     name="ask_human",
                     args={
-                        "question": f"No model available. How should we proceed with: {task}?",
+                        "question": f"No model available. Choose the next step for: {task}",
                         "risk": "info",
+                        "mode": "next_step",
                     },
                 )
             ],

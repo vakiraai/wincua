@@ -1,7 +1,7 @@
 [project]
 name = "wincua-hitl"
 version = "0.1.0"
-description = "wincua local HITL UI + ask_human transport"
+description = "wincua local HITL UI (loopback web, CLI, off) + ask_human / confirm_action"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -9,7 +9,7 @@ authors = [{ name = "wincua contributors" }]
 dependencies = []
 
 [project.optional-dependencies]
-serve = []  # fastapi + uvicorn when wired
+serve = []  # stdlib server; kept so `wincua-hitl[serve]` installs
 dev = ["pytest>=8.0"]
 
 [project.scripts]
