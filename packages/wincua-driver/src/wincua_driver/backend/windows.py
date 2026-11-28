@@ -880,6 +880,28 @@ class WindowsBackend:
         except Exception:
             pass
 
+    def _bind_target(self, target: str) -> None:
+        """Bind ``target`` unless it is already the bound window.
+
+        Re-binding re-walks the tree, which renumbers every snapshot id
+        (``num7Button_232``); ids from the last observation must keep working.
+        """
+        # Calculator binds its CoreWindow while _find_window returns the outer
+        # ApplicationFrameWindow, so compare by bound target, not by window.
+        if self._window is not None and self._target_title == target:
+            try:
+                alive = not hasattr(self._window, "exists") or self._window.exists(timeout=0)
+            except Exception:
+                alive = False
+            if alive:
+                return
+        win = self._find_window(target, timeout_s=self.control_timeout_s)
+        if win is None:
+            return
+        if self._window is not None and self._window_key(win) == self._window_key(self._window):
+            return
+        self._bind_window(win, title=target)
+
     def _restore_and_focus(self, window: Any) -> None:
         """Restore a minimized/ghost UWP frame and bring it to the foreground."""
         try:
@@ -1801,9 +1823,7 @@ class WindowsBackend:
                     ),
                 )
             if args.get("target"):
-                win = self._find_window(str(args["target"]), timeout_s=self.control_timeout_s)
-                if win is not None:
-                    self._bind_window(win, title=str(args["target"]))
+                self._bind_target(str(args["target"]))
             return self._invoke(str(eid))
 
         if name in ("uia.type", "type_by"):
@@ -1813,9 +1833,7 @@ class WindowsBackend:
             if not eid and args.get("name"):
                 eid = f"name:{args['name']}"
             if args.get("target"):
-                win = self._find_window(str(args["target"]), timeout_s=self.control_timeout_s)
-                if win is not None:
-                    self._bind_window(win, title=str(args["target"]))
+                self._bind_target(str(args["target"]))
             text = str(args.get("text") or "")
             return self._type(
                 Type(

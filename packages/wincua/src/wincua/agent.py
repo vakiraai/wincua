@@ -31,6 +31,8 @@ class AgentResult:
 class Agent:
     task: str
     provider: Any = None
+    # None = no human (fail closed); "auto" | "ui" | "cli" | "off" builds a
+    # transport from the [hitl] config; or pass a wincua_hitl transport.
     hitl: Any = None
     allow: Sequence[str] = ()
     mode: Mode = "foreground"
@@ -42,6 +44,8 @@ class Agent:
     max_consecutive_errors: int = 5
     max_turns: int = 64
     observe_target: str = "foreground"
+    # None = follow the transport's [hitl] confirm_risky_actions.
+    confirm_risky: bool | None = None
 
     def __post_init__(self) -> None:
         self._apply_config()
@@ -49,6 +53,10 @@ class Agent:
             from wincua_providers import NullProvider
 
             self.provider = NullProvider()
+        if self.hitl is not None:
+            from wincua_hitl import make_transport
+
+            self.hitl = make_transport(self.hitl)
 
     def _apply_config(self) -> None:
         """Build the provider from wincua.toml when none (or a name) is given.
@@ -190,6 +198,7 @@ class Agent:
         target = self.observe_target
         error_streak = 0
         guard = LoopGuard()
+        human_note: str | None = None
 
         for turn in range(self.max_turns):
             obs = await observe(target=target, include=["uia", "app", "screenshot"])
@@ -251,6 +260,7 @@ class Agent:
                     answer = await self._ask_human(
                         question=plan.error or f"How should we proceed with: {self.task}?",
                         risk="info",
+                        observation=last_obs,
                     )
                     steps.append({"kind": "ask_human", "answer": answer})
                     if answer is None:
@@ -275,8 +285,12 @@ class Agent:
             turn_sigs: list[str] = []
             stuck: str | None = None
 
-            for pstep in plan.steps:
+            queue: list[PlanStep] = list(plan.steps)
+            human_steps: set[int] = set()
+            while queue:
+                pstep = queue.pop(0)
                 assert isinstance(pstep, PlanStep)
+                by_human = id(pstep) in human_steps
                 history.append(
                     {"kind": pstep.kind, "name": pstep.name, "args": pstep.args}
                 )
@@ -287,6 +301,55 @@ class Agent:
                         pstep.name or "", dict(pstep.args or {}), last_obs, current_target=target
                     )
                     entry["args"] = pstep.args
+
+                if (
+                    pstep.kind == "ask_human"
+                    and (pstep.args or {}).get("mode") == "next_step"
+                    and self.hitl is not None
+                ):
+                    question = (pstep.args or {}).get("question")
+                    if human_note:
+                        question = f"{human_note}\n{question or 'Choose the next action.'}"
+                        human_note = None
+                    resp = await self._human_next_step(question=question, observation=last_obs)
+                    steps.append(_human_record("next_step", resp))
+                    if resp is None:
+                        finished, ok = True, False
+                        message = "HITL unavailable / no answer (fail-closed)"
+                        break
+                    if resp.kind == "takeover":
+                        resp = await self._takeover(steps, last_obs)
+                        if resp is None:
+                            finished, ok = True, False
+                            message = "HITL unavailable / no answer (fail-closed)"
+                            break
+                    if resp.kind == "action" and getattr(resp, "actions", None):
+                        chained = [
+                            PlanStep(kind="tool", name=a["tool"], args=dict(a.get("args") or {}))
+                            for a in resp.actions
+                        ]
+                        human_steps.update(id(c) for c in chained)
+                        queue[0:0] = chained
+                        continue
+                    follow = _step_from_response(resp, PlanStep)
+                    if follow is not None:
+                        human_steps.add(id(follow))
+                        queue.insert(0, follow)
+                    elif resp.kind == "instruction":
+                        history.append({"kind": "human_instruction", "text": resp.text})
+                        resume = getattr(self.provider, "resume", None)
+                        if getattr(resp, "note", None):
+                            human_note = resp.note
+                        elif resume and resume(f"human instruction: {resp.text}"):
+                            steps.append({"kind": "resume", "instruction": resp.text, "to": self.provider_name})
+                            error_streak = 0
+                            guard.reset()
+                        elif self.provider_name == "null":
+                            human_note = (
+                                f"No model is running, so {resp.text!r} was not executed. "
+                                "Use a command or pick an action."
+                            )
+                    continue
 
                 if pstep.kind == "done":
                     finished = True
@@ -308,6 +371,7 @@ class Agent:
                         or pstep.message
                         or self.task,
                         risk=(pstep.args or {}).get("risk", "info"),
+                        observation=last_obs,
                     )
                     steps.append({"kind": "ask_human", "answer": answer})
                     entry["result"] = {"answer": answer}
@@ -328,6 +392,56 @@ class Agent:
                 # tool (or bare name treated as tool)
                 tool_name = pstep.name or pstep.kind
                 args = dict(pstep.args or {})
+                planner_risk = args.pop("risk", None)
+                if not by_human and self._should_confirm():
+                    from wincua_hitl import risk_reason
+
+                    reason = risk_reason(tool_name, {**args, "risk": planner_risk})
+                    if reason:
+                        decision = await self.hitl.confirm(
+                            action={"tool": tool_name, "args": args},
+                            reason=reason,
+                            observation=last_obs,
+                            task=self.task,
+                        )
+                        steps.append(
+                            {**_human_record("confirm", decision), "tool": tool_name, "reason": reason}
+                        )
+                        if decision is None:
+                            finished, ok = True, False
+                            message = "risky action not confirmed (fail-closed)"
+                            break
+                        if decision.kind == "takeover":
+                            follow_up = await self._takeover(steps, last_obs)
+                            if follow_up is None:
+                                finished, ok = True, False
+                                message = "HITL unavailable / no answer (fail-closed)"
+                                break
+                            nxt = _step_from_response(follow_up, PlanStep)
+                            if nxt is not None:
+                                human_steps.add(id(nxt))
+                                queue.insert(0, nxt)
+                            continue
+                        if not decision.approved:
+                            history.append({"kind": "rejected", "name": tool_name, "args": args})
+                            continue
+                if (
+                    by_human
+                    and tool_name in ("invoke", "type", "type_text")
+                    and not args.get("target")
+                    and target != "foreground"
+                ):
+                    args["target"] = target
+                if (
+                    by_human
+                    and tool_name in ("type", "type_text", "key", "hotkey")
+                    and not args.get("element_id")
+                    and target != "foreground"
+                    and not dry_run
+                ):
+                    # Keystrokes go to the focused window, which in CLI mode is
+                    # the terminal the human is typing in.
+                    await act(Semantic(name="focus", args={"title": target, "timeout_s": 5}))
                 result_record = await self._dispatch_tool(
                     tool_name=tool_name,
                     args=args,
@@ -341,8 +455,10 @@ class Agent:
                     observe_fn=observe,
                     last_obs=last_obs,
                 )
+                if by_human:
+                    result_record["by"] = "human"
                 steps.append(result_record)
-                if result_record.get("detail") and self.recorder:
+                if result_record.get("detail") and (self.recorder or by_human):
                     result_record["detail_log"] = _write_detail(
                         session.session_id, turn, tool_name, result_record.pop("detail")
                     )
@@ -351,19 +467,35 @@ class Agent:
                     for k in ("ok", "message", "display", "info")
                     if result_record.get(k) is not None
                 }
-                if recovers:
-                    # LLM planners see failures in history and re-plan; the guard
-                    # hands over to the next provider when they go in circles.
-                    sig = action_signature(tool_name, args)
-                    turn_sigs.append(sig)
-                    stuck = guard.record_action(sig, result_record.get("ok") is not False)
+                if by_human:
+                    # Failures go back to the human on the next prompt; no guard / escalation.
                     if result_record.get("ok") is False:
+                        log = result_record.get("detail_log")
+                        human_note = f"Last action {tool_name} failed: {result_record.get('message')}" + (
+                            f" (full details: {log})" if log else ""
+                        )
+                        skipped = [q for q in queue if id(q) in human_steps]
+                        if skipped:
+                            queue = [q for q in queue if id(q) not in human_steps]
+                            human_note += f" Skipped the remaining {len(skipped)} chained step(s)."
+                    else:
+                        shown = {k: v for k, v in args.items() if k != "target"}
+                        ran = f"Ran {tool_name} {shown}: ok."
+                        human_note = f"{human_note} {ran}" if human_note and human_note.startswith("Ran ") else ran
+                else:
+                    if recovers:
+                        # LLM planners see failures in history and re-plan; the guard
+                        # hands over to the next provider when they go in circles.
+                        sig = action_signature(tool_name, args)
+                        turn_sigs.append(sig)
+                        stuck = guard.record_action(sig, result_record.get("ok") is not False)
+                        if result_record.get("ok") is False:
+                            break
+                    if result_record.get("ok") is False:
+                        finished = True
+                        ok = False
+                        message = result_record.get("message") or "tool failed"
                         break
-                if result_record.get("ok") is False:
-                    finished = True
-                    ok = False
-                    message = result_record.get("message") or "tool failed"
-                    break
                 error_streak = 0
                 # Allow scripts to retarget observe
                 if tool_name in ("observe", "focus", "launch", "open_url") and args.get(
@@ -401,12 +533,36 @@ class Agent:
             message=f"max_turns ({self.max_turns}) exceeded",
         )
 
-    async def _ask_human(self, *, question: str, risk: str = "info") -> str | None:
+    async def _ask_human(
+        self, *, question: str, risk: str = "info", observation: Any = None
+    ) -> str | None:
         if self.hitl is None:
             from wincua._terminal_prompt import ask_on_terminal
 
             return await ask_on_terminal(question)
-        return await self.hitl.prompt(question=question, risk=risk)
+        return await self.hitl.prompt(
+            question=question, risk=risk, observation=observation, task=self.task
+        )
+
+    def _should_confirm(self) -> bool:
+        if self.hitl is None:
+            return False
+        if self.confirm_risky is not None:
+            return self.confirm_risky
+        return bool(getattr(self.hitl, "confirm_risky_actions", True))
+
+    async def _human_next_step(self, *, question: str | None, observation: Any) -> Any:
+        if self.hitl is None:
+            return None
+        return await self.hitl.next_step(
+            task=self.task, observation=observation, question=question
+        )
+
+    async def _takeover(self, steps: list[dict[str, Any]], observation: Any) -> Any:
+        """Human drives the desktop; returns the resume/done/abort response."""
+        resp = await self.hitl.takeover(task=self.task, observation=observation)
+        steps.append(_human_record("takeover", resp))
+        return resp
 
     async def _dispatch_tool(
         self,
@@ -513,6 +669,8 @@ class Agent:
 
         if name in ("invoke", "uia.invoke"):
             eid = args.get("element_id")
+            if eid and str(eid).startswith("auto:") and not args.get("auto_id"):
+                args = {**args, "auto_id": str(eid)[5:]}
             if not eid and args.get("auto_id"):
                 eid = f"auto:{args['auto_id']}"
             if not eid and args.get("name"):
@@ -646,3 +804,24 @@ def _tool_result(name: str, result: Any) -> dict[str, Any]:
     if info:
         out["info"] = info
     return out
+
+
+def _human_record(kind: str, resp: Any) -> dict[str, Any]:
+    return {
+        "kind": "human",
+        "request": kind,
+        "response": resp.kind if resp is not None else "timeout",
+        "action": getattr(resp, "action", None),
+        "text": getattr(resp, "text", None),
+    }
+
+
+def _step_from_response(resp: Any, step_cls: Any) -> Any:
+    """HITL response -> PlanStep to run next, or None (resume / instruction)."""
+    if resp.kind == "action" and resp.action:
+        return step_cls(kind="tool", name=resp.action["tool"], args=dict(resp.action.get("args") or {}))
+    if resp.kind == "done":
+        return step_cls(kind="done", message=resp.text or "human marked the task done")
+    if resp.kind == "abort":
+        return step_cls(kind="abort", message=resp.text or "human aborted")
+    return None

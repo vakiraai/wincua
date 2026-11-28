@@ -36,7 +36,7 @@ PyPI check (Nov 2026): `pywin32==312` ships `pywin32-312-cp315-cp315-win_amd64.w
 | `wincua` | `from wincua import Agent` | Agent observe/act loop + façade |
 | `wincua-driver` | `wincua_driver` | observe / act (`null` \| `mock` \| `windows`) |
 | `wincua-providers` | `wincua_providers` | Ollama, llama.cpp, OpenAI-compat, OpenAI, Anthropic, Null, Scripted (stdlib HTTP, no extra deps) |
-| `wincua-hitl` | `wincua_hitl` | Local HITL UI + `ask_human` |
+| `wincua-hitl` | `wincua_hitl` | Local HITL UI (`ui` / `cli` / `off`) + `ask_human` / `confirm_action` |
 | `wincua-mcp` | `wincua_mcp` | MCP server (`wincua-mcp`) |
 | `wincua-excel` | — | Post-MVP pack (stub) |
 | `wincua-slicer` | — | Phase 2 pack (stub) |
@@ -99,6 +99,18 @@ python examples/calculator_arith_demo.py --timeout 60
 $env:WINCUA_LAUNCH_TIMEOUT_S = "60"
 ```
 
+### Human in the loop (no model)
+
+```powershell
+python examples/calculator_hitl_demo.py                 # browser UI on 127.0.0.1:8765
+python examples/calculator_hitl_demo.py --hitl cli      # answer in this terminal
+python examples/calculator_hitl_demo.py --provider scripted   # approve/reject the risky "=" press
+```
+
+With `NullProvider` the agent asks you for every step: pick a Calculator button,
+type a command (`invoke auto:num1Button`, `key enter`), take over, or mark done.
+See [packages/wincua-hitl/README.md](packages/wincua-hitl/README.md).
+
 ### Launch / import troubleshooting
 
 | Symptom | Likely cause | What to do |
@@ -152,6 +164,7 @@ display itself and checks 42.
 ```bash
 python examples/calculator_arith_demo.py --mock
 python examples/browser_form_demo.py --mock
+python examples/calculator_hitl_demo.py --mock --hitl cli
 ```
 
 `--mock` exercises the same scripted `Agent.run` loop against `MockBackend`
