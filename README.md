@@ -113,7 +113,43 @@ The model's turns can differ from run to run; the `PASS` line is what counts.
 If Ollama is unavailable, the run prints `[wincua] ollama unavailable: <reason>; falling back to null`
 and asks you for each step in the terminal (Ctrl+C to stop).
 
-### 6. MCP server in Cursor
+### 6. Reliability gate (optional, Phase 1)
+
+`examples/reliability.py` runs the browser and Calculator demos **5 times each** (default)
+in fresh processes, scores them against the **80% gate** (at least 4 of 5 passes per demo),
+and exits `0` only when both demos meet it. With `--provider ollama` it uses
+`browser_form_demo.py` and `calculator_llm_demo.py`; keep the desktop clear and
+don't interact — runs are unattended and a fallback to the human fails closed.
+
+```powershell
+python examples/reliability.py --provider ollama
+# default: 5 runs per demo, gate 80%, provider from wincua.toml if --provider omitted
+```
+
+Expect roughly 10–30 minutes on a warm machine (first Ollama load plus 10 model-planned runs).
+Reports land under `recordings\reliability-<YYYYMMDD-HHMMSS>\`:
+
+| File | Contents |
+| --- | --- |
+| `report.md` / `report.json` | Pass rates, gate verdict, per-run table |
+| `logs\browser-01.log` … `logs\calculator-05.log` | Full stdout/stderr from each subprocess |
+
+```text
+wincua reliability
+  provider: ollama (wincua.toml)
+  demos:    browser, calculator x 5  gate 80%  backend windows
+  report:   recordings\reliability-20261128-153045
+...
+browser    4/5 passed = 80%  (gate 80%)  MEETS GATE  median 42.3s
+calculator 5/5 passed = 100%  (gate 80%)  MEETS GATE  median 38.1s
+report: recordings\reliability-20261128-153045\report.md  ...\report.json
+gate 80%: PASS
+```
+
+On any OS without a desktop, `python examples/reliability.py --mock --provider scripted`
+checks the harness only. Details: [Reliability gate](#reliability-gate-phase-1-at-least-4-of-5-runs) below.
+
+### 7. MCP server in Cursor
 
 Add this to `%USERPROFILE%\.cursor\mcp.json` (merge into `mcpServers` if the file
 exists). Use full paths: Cursor does not activate your venv.
