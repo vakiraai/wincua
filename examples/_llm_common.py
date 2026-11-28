@@ -56,9 +56,15 @@ def print_run(agent: Any, result: Any) -> None:
             status = "ok" if step.get("ok") else f"FAILED: {step.get('message')}"
             if step.get("detail_log"):
                 status += f" (full detail: {step['detail_log']})"
+            info = step.get("info") or {}
+            if info.get("retried") or info.get("fallback"):
+                how = "retried" if info.get("retried") else f"{info['fallback']} fallback"
+                status += f" ({how} after {info.get('invoke_error')})"
             print(f"      -> {step.get('name')}: {status}")
         elif kind == "escalate":
             print(f"  ESCALATE: {step['reason']} -> {step.get('to') or 'stop'}")
+        elif kind == "resume":
+            print(f"  HUMAN: {step['instruction']!r} -> {step.get('to') or 'no model to hand back to'}")
         elif kind in {"error", "done", "abort", "ask_human"}:
             print(f"  - {step}")
     for event in getattr(agent.provider, "events", []) or []:

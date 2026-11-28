@@ -51,6 +51,14 @@ class FallbackProvider:
         self._index += 1
         return True
 
+    def resume(self, reason: str) -> bool:
+        """Go back to the first provider (e.g. after the human gave the model a hint)."""
+        if self._index == 0:
+            return False
+        self.events.append(f"{self.name} handing back to {self.chain[0]} ({reason})")
+        self._index = 0
+        return True
+
     async def plan(
         self,
         *,

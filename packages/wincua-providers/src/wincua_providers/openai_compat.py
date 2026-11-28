@@ -25,7 +25,7 @@ from wincua_providers.tools import (
     json_mode_instructions,
     openai_tools,
     parse_arguments,
-    to_plan_step,
+    to_plan_steps,
 )
 
 
@@ -138,8 +138,8 @@ class OpenAICompatProvider(HTTPChatProvider):
         for call in message.get("tool_calls") or []:
             fn = call.get("function") or {}
             if fn.get("name"):
-                steps.append(
-                    to_plan_step(fn["name"], parse_arguments(fn.get("arguments")), call.get("id"))
+                steps.extend(
+                    to_plan_steps(fn["name"], parse_arguments(fn.get("arguments")), call.get("id"))
                 )
         if not steps:
             steps = self._steps_from_text(text)

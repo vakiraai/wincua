@@ -37,7 +37,7 @@ def normalize_model_args(
     * maps ``element_id`` to a stable ``auto:<AutomationId>`` when it is a bare
       AutomationId, a snapshot id (``clearButton_112``) or an element name.
     """
-    out = {k: v for k, v in args.items() if v not in (None, "") and k != "role"}
+    out = {k: v for k, v in args.items() if v not in (None, "") and k not in ("role", "tool")}
     if "target" in out:
         titles = {str(current_target or "").lower()}
         app = getattr(observation, "app", None) or {}
@@ -99,7 +99,10 @@ def observation_fingerprint(observation: Any) -> str:
 class LoopGuard:
     """Spots a planner going in circles.
 
-    * the same actions on an unchanged screen for ``repeat_limit`` turns in a row,
+    * the same action list for ``repeat_limit`` turns in a row. The whole list is
+      compared, not single actions, so pressing one button twice within a turn
+      (``1``, ``1`` for 11) is fine. The screen is ignored: a stuck planner may
+      still change it (e.g. typing ``1`` again and again),
     * ``failure_limit`` failed tool calls in a row.
     """
 
@@ -109,7 +112,9 @@ class LoopGuard:
         self.reset()
 
     def reset(self) -> None:
-        self._last_turn: tuple[str, tuple[str, ...]] | None = None
+        self._last_turn: tuple[str, ...] | None = None
+        self._last_fingerprint: str | None = None
+        self._screen_changed = False
         self._repeats = 0
         self._failures = 0
         self._last_failed: str | None = None
@@ -127,12 +132,15 @@ class LoopGuard:
     def end_turn(self, fingerprint: str, signatures: list[str]) -> str | None:
         if not signatures:
             return None
-        key = (fingerprint, tuple(signatures))
-        self._repeats = self._repeats + 1 if key == self._last_turn else 1
-        self._last_turn = key
+        key = tuple(signatures)
+        if key == self._last_turn:
+            self._repeats += 1
+            self._screen_changed |= fingerprint != self._last_fingerprint
+        else:
+            self._repeats, self._screen_changed = 1, False
+        self._last_turn, self._last_fingerprint = key, fingerprint
         if self._repeats >= self.repeat_limit:
-            return (
-                f"same action repeated {self._repeats} turns without changing the screen "
-                f"({', '.join(signatures)})"
-            )
+            screen = "" if self._screen_changed else " without changing the screen"
+            shown = ", ".join(signatures[:4]) + (", …" if len(signatures) > 4 else "")
+            return f"same actions repeated {self._repeats} turns in a row{screen} ({shown})"
         return None

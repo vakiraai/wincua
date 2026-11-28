@@ -34,7 +34,7 @@ BUILTIN_PROVIDERS = ("ollama", "llamacpp", "anthropic", "openai", "openai_compat
 
 # Built-in defaults per provider (mirrors wincua.example.toml).
 PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
-    "ollama": {"base_url": "http://127.0.0.1:11434", "model": "qwen2.5vl:7b"},
+    "ollama": {"base_url": "http://127.0.0.1:11434", "model": "qwen2.5:7b"},
     "llamacpp": {"base_url": "http://127.0.0.1:8080", "model": "local"},
     "anthropic": {"model": "claude-sonnet-4-5", "api_key_env": "ANTHROPIC_API_KEY"},
     "openai": {"model": "gpt-4.1", "api_key_env": "OPENAI_API_KEY"},

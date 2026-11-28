@@ -629,10 +629,50 @@ def pick_calculator_frame(windows: Sequence[Any]) -> Any | None:
     return None
 
 
+# COM / UIA HRESULTs that usually clear up on retry: the element went stale
+# (Calculator re-creates buttons) or the UIA provider was busy.
+TRANSIENT_HRESULTS: dict[int, str] = {
+    -2147220991: "UIA_E_ELEMENTNOTAVAILABLE",  # 0x80040201
+    -2147220992: "UIA_E_ELEMENTNOTENABLED",  # 0x80040200
+    -2147220990: "UIA_E_NOCLICKABLEPOINT",  # 0x80040202
+    -2146233083: "UIA_E_TIMEOUT",  # 0x80131505
+    -2147417848: "RPC_E_DISCONNECTED",  # 0x80010108
+    -2147418111: "RPC_E_CALL_REJECTED",  # 0x80010001
+    -2147417846: "RPC_E_SERVERCALL_RETRYLATER",  # 0x8001010A
+}
+
+
+def _hresult(exc: BaseException) -> int | None:
+    code = getattr(exc, "hresult", None)
+    if code is None and exc.args and isinstance(exc.args[0], int):
+        code = exc.args[0]
+    if not isinstance(code, int):
+        return None
+    return code - (1 << 32) if code > 0x7FFFFFFF else code
+
+
+def transient_uia_error(exc: BaseException) -> str | None:
+    """Name of a retryable COM/UIA error in ``exc``'s chain, else None."""
+    for e in _exception_chain(exc):
+        code = _hresult(e)
+        if code in TRANSIENT_HRESULTS:
+            return TRANSIENT_HRESULTS[code]
+    return None
+
+
+def describe_com_error(exc: BaseException) -> str:
+    name = transient_uia_error(exc)
+    code = _hresult(exc)
+    if code is not None:
+        return f"{name or 'COM error'} 0x{code & 0xFFFFFFFF:08X}"
+    return f"{type(exc).__name__}: {exc}"
+
+
 class WindowsBackend:
     """pywinauto/UIA backend. Instantiation fails clearly off Windows."""
 
     name = "windows"
+    invoke_retry_delay_s = 0.3
 
     def __init__(
         self,
@@ -1166,12 +1206,12 @@ class WindowsBackend:
         if element_id in self._wrappers:
             w = self._wrappers[element_id]
             try:
-                if hasattr(w, "exists") and not w.exists(timeout=0.5):
-                    pass
-                else:
+                if not hasattr(w, "exists") or w.exists(timeout=0.5):
                     return w
-            except Exception:
-                return w
+            except Exception as exc:
+                if not transient_uia_error(exc):
+                    return w
+            self._forget_wrapper(element_id)
         roots = self._search_roots()
         if not roots:
             return None
@@ -1375,8 +1415,35 @@ class WindowsBackend:
                 error=StructuredError(code="act_failed", message=str(exc)),
             )
 
+    def _forget_wrapper(self, element_id: str) -> None:
+        """Drop a (stale) cached wrapper and every alias pointing at it."""
+        stale = self._wrappers.pop(element_id, None)
+        if stale is not None:
+            for key in [k for k, v in self._wrappers.items() if v is stale]:
+                self._wrappers.pop(key, None)
+
+    def _click_center(self, wrapper: Any) -> None:
+        try:
+            rect = wrapper.rectangle()
+            x, y = (rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2
+            if rect.right <= rect.left or rect.bottom <= rect.top:
+                raise ValueError("empty rectangle")
+        except Exception:
+            wrapper.click_input()
+            return
+        from pywinauto import mouse
+
+        mouse.click(coords=(x, y))
+
     def _invoke(self, element_id: str) -> ActionResult:
-        wrapper = self._resolve_wrapper(element_id)
+        try:
+            wrapper = self._resolve_wrapper(element_id)
+        except Exception as exc:
+            if not transient_uia_error(exc):
+                raise
+            time.sleep(self.invoke_retry_delay_s)
+            self._forget_wrapper(element_id)
+            wrapper = self._resolve_wrapper(element_id)
         # Calculator clear fallback: Escape when neither clear button exists
         if wrapper is None and element_id in ("auto:clearButton", "auto:clearEntryButton"):
             try:
@@ -1425,18 +1492,47 @@ class WindowsBackend:
                     },
                 ),
             )
+        return self._invoke_wrapper(element_id, wrapper)
+
+    def _invoke_wrapper(self, element_id: str, wrapper: Any) -> ActionResult:
+        """Invoke; on a transient COM/UIA error re-resolve and retry once; then click the center."""
         try:
             wrapper.invoke()
-        except Exception:
+            return ActionResult(ok=True, mode_used="windows")
+        except Exception as exc:
+            error: BaseException = exc
+        info: dict[str, Any] = {"invoke_error": describe_com_error(error)}
+        if transient_uia_error(error):
+            time.sleep(self.invoke_retry_delay_s)
+            self._forget_wrapper(element_id)
             try:
-                wrapper.click_input()
-            except Exception as exc:
-                return ActionResult(
-                    ok=False,
-                    mode_used="windows",
-                    error=StructuredError(code="invoke_failed", message=str(exc)),
-                )
-        return ActionResult(ok=True, mode_used="windows")
+                fresh = self._resolve_wrapper(element_id)
+            except Exception:
+                fresh = None
+            if fresh is not None:
+                wrapper = fresh
+                try:
+                    wrapper.invoke()
+                    return ActionResult(ok=True, mode_used="windows", info={**info, "retried": True})
+                except Exception as exc:
+                    error = exc
+                    info["retry_error"] = describe_com_error(exc)
+        try:
+            self._click_center(wrapper)
+        except Exception as exc:
+            return ActionResult(
+                ok=False,
+                mode_used="windows",
+                error=StructuredError(
+                    code="invoke_failed",
+                    message=(
+                        f"Invoke {element_id!r} failed ({describe_com_error(error)}) "
+                        f"and the click fallback failed ({describe_com_error(exc)})"
+                    ),
+                    details=info,
+                ),
+            )
+        return ActionResult(ok=True, mode_used="windows", info={**info, "fallback": "click"})
 
     def _click(self, action: Click) -> ActionResult:
         if action.element_id:

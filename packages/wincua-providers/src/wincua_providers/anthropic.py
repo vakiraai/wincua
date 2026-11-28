@@ -27,7 +27,7 @@ from wincua_providers.prompting import (
     user_turn_text,
     window_origin,
 )
-from wincua_providers.tools import anthropic_tools, parse_arguments, to_plan_step
+from wincua_providers.tools import anthropic_tools, parse_arguments, to_plan_steps
 
 ANTHROPIC_VERSION = "2023-06-01"
 
@@ -260,7 +260,7 @@ class AnthropicProvider(HTTPChatProvider):
                 if name == "computer":
                     steps.append(self.map_computer_action(inp, block.get("id")))
                 else:
-                    steps.append(to_plan_step(name, inp, block.get("id")))
+                    steps.extend(to_plan_steps(name, inp, block.get("id")))
         text = "\n".join(t for t in texts if t)
         if not steps:
             steps = self._steps_from_text(text)

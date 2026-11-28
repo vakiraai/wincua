@@ -20,7 +20,7 @@ from wincua_providers.tools import (
     json_mode_instructions,
     openai_tools,
     parse_arguments,
-    to_plan_step,
+    to_plan_steps,
 )
 
 
@@ -34,7 +34,7 @@ class OllamaProvider(HTTPChatProvider):
 
     name = "ollama"
     default_base_url = "http://127.0.0.1:11434"
-    default_model = "qwen2.5vl:7b"
+    default_model = "qwen2.5:7b"
 
     def __init__(
         self,
@@ -43,11 +43,13 @@ class OllamaProvider(HTTPChatProvider):
         *,
         num_ctx: int | None = None,
         keep_alive: str | None = None,
+        think: bool | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(model, base_url, **kwargs)
         self.num_ctx = num_ctx
         self.keep_alive = keep_alive
+        self.think = think
 
     def build_messages(
         self, task: str, observation: Any, history: Sequence[Any] | None
@@ -122,6 +124,8 @@ class OllamaProvider(HTTPChatProvider):
             payload["options"] = opts
         if self.keep_alive:
             payload["keep_alive"] = self.keep_alive
+        if self.think is not None:
+            payload["think"] = self.think
         return payload
 
     async def _chat(
@@ -145,8 +149,8 @@ class OllamaProvider(HTTPChatProvider):
             fn = call.get("function") or {}
             name = fn.get("name")
             if name:
-                steps.append(
-                    to_plan_step(name, parse_arguments(fn.get("arguments")), call.get("id") or None)
+                steps.extend(
+                    to_plan_steps(name, parse_arguments(fn.get("arguments")), call.get("id") or None)
                 )
         if not steps:
             steps = self._steps_from_text(text)

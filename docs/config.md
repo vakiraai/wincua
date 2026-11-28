@@ -69,6 +69,7 @@ fails closed.
 | `tool_mode` | Ollama, OpenAI-compatible | `auto` (default): native tool calls, switching to JSON replies if the server says tools are unsupported. `native` / `json` force one mode |
 | `retries` | all | Retries for 429/502/503/504/529 and timeouts (default 1) |
 | `num_ctx`, `keep_alive` | Ollama | Passed to Ollama options |
+| `think` | Ollama | Ollama's `think` flag for thinking models (`qwen3`, `qwen3-vl`); `false` answers faster |
 | `computer_use` | Anthropic | Also offer Anthropic's `computer` tool (see below) |
 | `steps` | scripted | List of `{kind, name, args, message}` plan steps |
 
@@ -77,9 +78,18 @@ Built-in defaults match the example file, so `[providers.ollama]` can be omitted
 ### Provider notes
 
 - **Ollama** uses the native `POST /api/chat` with `images` and `tools`.
-  Vision models such as `qwen2.5vl` do not advertise tool support. On the first
-  "does not support tools" error, wincua switches to JSON replies
-  (`format: "json"`) automatically.
+  Models without tool support (ollama.com lists `qwen2.5vl` as vision-only)
+  are switched to JSON replies (`format: "json"`) on the first "does not
+  support tools" error. In JSON mode a reply is one call
+  `{"tool": ..., "args": {...}}` or several `{"actions": [...]}`.
+
+  **Which model.** Small models are much more reliable with native tool calls.
+  The default is `qwen2.5:7b` (text, tools) with `send_screenshot = false`:
+  the Elements list already carries every id the model needs.
+  `qwen3:8b` (set `think = false`) and `llama3.1:8b` also have native tools.
+  For screenshots plus tools use `qwen3-vl:8b` (the `ollama_vision` profile in
+  the example). `qwen2.5vl:7b` still works, in JSON mode, but in live runs it
+  tried to batch by nesting calls and repeated its first action.
 - **llama.cpp** (`llama-server`) uses the OpenAI-compatible `/v1/chat/completions`.
   Start it with `--jinja` for native tool calls and with a vision model plus its
   `--mmproj` for screenshots. Without them, wincua falls back to JSON replies and
@@ -103,7 +113,8 @@ Each observation lists elements as `id role "name"`. The id is a stable
 cleans up what a model sends before it reaches the driver:
 
 - An `element_id` that is a bare AutomationId, an older snapshot id (`clearButton_112`) or an element name is mapped to the matching element.
-- Empty values and stray keys (`role`) are dropped.
+- Empty values and stray keys (`role`, `tool`) are dropped.
+- Calls nested inside another call's arguments (`invoke(element_id=A, args={"element_id": B, ...})`) or listed under `actions` are flattened into separate calls, in order.
 - A `target` that is not the observed window's title is ignored.
 
 When a tool fails, the model sees a short error. Long driver output, such as
@@ -112,11 +123,25 @@ UIA tree dumps, goes to `recordings/<session>-errors.log` when the recorder is o
 **Loop guard.** The Agent hands planning to the next provider in the chain
 (ending in `null`, which asks the human) when any of these happen:
 
-- The same actions repeat for 3 turns without the screen changing.
+- A turn proposes the same action list as the previous 2 turns, even if the screen changed. The whole list is compared, so pressing one button twice within a turn is fine.
 - 3 actions in a row fail.
 - The model replies 5 times in a row without a tool call (`Agent.max_consecutive_errors`).
 
 With no provider left, the run stops.
+
+**Asking the human without a HITL UI.** When `Agent(hitl=None)` and the
+process runs in a terminal, `ask_human` and the `null` planner prompt on
+stdin. Type an instruction to hand planning back to the first model in the
+chain with your hint in its history, `done` to finish, or `abort`. When
+stdin is not a terminal (CI, services), there is nobody to ask and the run
+fails closed.
+
+**Driver retries.** When Invoke raises a transient UIA/COM error, the
+Windows driver waits briefly, looks the element up again and retries Invoke
+once. If that also fails, it clicks the element's center. Transient errors
+include `UIA_E_ELEMENTNOTAVAILABLE` (0x80040201, shown as "An event was
+unable to invoke any of the subscribers"), element-not-enabled, no clickable
+point, UIA timeout and RPC disconnected/busy.
 
 ## `[driver]`
 

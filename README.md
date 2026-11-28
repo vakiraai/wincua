@@ -121,9 +121,12 @@ unreachable, wincua tries `[provider].fallback`, ending in `null` (ask the human
 copy wincua.example.toml wincua.toml
 python -m wincua.config --probe            # which file, which chain, what is reachable
 
-# Ollama (default in the example)
-ollama pull qwen2.5vl:7b
+# Ollama (default in the example): a text model with native tool calls
+ollama pull qwen2.5:7b
 python examples/calculator_llm_demo.py --provider ollama
+# ...or vision + tools
+ollama pull qwen3-vl:8b
+python examples/calculator_llm_demo.py --provider ollama_vision
 
 # llama.cpp — llama-server with tool calls (--jinja) and vision (mmproj via -hf)
 llama-server -hf ggml-org/Qwen2.5-VL-7B-Instruct-GGUF --jinja --port 8080

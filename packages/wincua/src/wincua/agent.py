@@ -89,6 +89,22 @@ class Agent:
         history.append({"kind": "escalation", "turn": turn, "text": f"Previous planner stopped: {reason}"})
         return handed_over
 
+    def _apply_human_answer(self, answer: str, steps: list[dict[str, Any]]) -> tuple[bool, str] | None:
+        """Answer to the null planner: finish, abort, or hand the instruction back to a model."""
+        from wincua._terminal_prompt import classify_answer
+
+        kind = classify_answer(answer)
+        if kind == "done":
+            steps.append({"kind": "done", "message": "done (human)", "by": "human"})
+            return True, "done (human)"
+        if kind == "abort":
+            steps.append({"kind": "abort", "message": "aborted by human", "by": "human"})
+            return False, "aborted by human"
+        resume = getattr(self.provider, "resume", None)
+        resumed = bool(resume and resume(f"human instruction: {answer}"))
+        steps.append({"kind": "resume", "instruction": answer, "to": self.provider_name if resumed else None})
+        return None
+
     def _ensure_backend(self) -> None:
         from wincua_driver.backend import get_backend, set_backend
         from wincua_driver.backend.windows import is_windows
@@ -300,6 +316,13 @@ class Agent:
                         ok = False
                         message = "HITL unavailable / no answer (fail-closed)"
                         break
+                    if self.provider_name == "null":
+                        outcome = self._apply_human_answer(answer, steps)
+                        if outcome is not None:
+                            finished, (ok, message) = True, outcome
+                            break
+                        error_streak = 0
+                        guard.reset()
                     continue
 
                 # tool (or bare name treated as tool)
@@ -380,7 +403,9 @@ class Agent:
 
     async def _ask_human(self, *, question: str, risk: str = "info") -> str | None:
         if self.hitl is None:
-            return None
+            from wincua._terminal_prompt import ask_on_terminal
+
+            return await ask_on_terminal(question)
         return await self.hitl.prompt(question=question, risk=risk)
 
     async def _dispatch_tool(
