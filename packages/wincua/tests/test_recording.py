@@ -92,6 +92,7 @@ def test_recording_has_raw_reply_parsed_actions_results_and_errors():
     assert plan1["raw"]["message"]["content"] == reply1 and plan1["text"] == reply1
     assert plan1["plan_steps"] == [{"kind": "tool", "name": "invoke", "args": {"element_id": "auto:missing"}, "message": None}]
     assert failed["ok"] is False and failed["turn"] == 0 and failed["args"]["auto_id"] == "missing"
+    assert failed["code"] == "not_found"
     assert failed["detail"] == LONG_ERROR  # the full driver error, not just the short message
     assert failed["detail_log"] and Path(failed["detail_log"]).is_file()
     assert plan2["raw"]["message"]["content"] == reply2
