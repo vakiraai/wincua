@@ -63,9 +63,10 @@ api_key_env = ""            # leave empty for local servers without auth
 
 [driver]
 backend = "windows"          # windows | mock | null
-# Process allow-list, added to each demo's own list. Win11 Calculator runs as
-# CalculatorApp.exe hosted in ApplicationFrameHost.exe; calc.exe is the launcher stub.
-allow = ["CalculatorApp.exe", "ApplicationFrameHost.exe", "calc.exe"]
+# Process allow-list, added to each demo's own list (and to wincua-mcp's). Win11
+# Calculator runs as CalculatorApp.exe hosted in ApplicationFrameHost.exe; calc.exe
+# is the launcher stub. msedge.exe is the browser form demo (add "chrome.exe" for --browser chrome).
+allow = ["CalculatorApp.exe", "ApplicationFrameHost.exe", "calc.exe", "msedge.exe"]
 launch_timeout_s = 45
 
 # Sections below are read by wincua-hitl and wincua-mcp.

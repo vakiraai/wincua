@@ -35,22 +35,27 @@
   </style>
 </head>
 <body>
+  <!--
+    UIA contract (Edge/Chrome): each HTML id is exposed as the AutomationId and
+    each <label for> becomes the Edit's Name. Drive it with auto:fullName /
+    auto:email / auto:submitButton, or name:Full name / name:Email / name:Submit form.
+    On success the result text is shown in #result, appended to the page title
+    and the URL fragment becomes #submitted.
+  -->
   <h1>wincua browser form demo</h1>
   <p>Local fixture for Edge/Chrome UIA + keyboard automation.</p>
-  <form id="demo-form" autocomplete="off">
-    <label for="name">Full name
-      <input id="name" name="name" type="text" aria-label="Full name" />
-    </label>
-    <label for="email">Email
-      <input id="email" name="email" type="email" aria-label="Email" />
-    </label>
-    <button id="submit" type="submit" aria-label="Submit form">Submit</button>
+  <form id="demoForm" autocomplete="off">
+    <label for="fullName">Full name</label>
+    <input id="fullName" name="fullName" type="text" />
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" />
+    <button id="submitButton" type="submit">Submit form</button>
   </form>
   <div id="result" role="status" aria-live="polite"></div>
   <script>
-    document.getElementById("demo-form").addEventListener("submit", function (ev) {
+    document.getElementById("demoForm").addEventListener("submit", function (ev) {
       ev.preventDefault();
-      var name = document.getElementById("name").value.trim();
+      var name = document.getElementById("fullName").value.trim();
       var email = document.getElementById("email").value.trim();
       var el = document.getElementById("result");
       if (!name || !email) {
@@ -58,9 +63,11 @@
         el.textContent = "Please fill name and email.";
         return;
       }
+      var text = "OK: " + name + " <" + email + ">";
       el.className = "ok";
-      el.textContent = "OK: " + name + " <" + email + ">";
-      document.title = "wincua form demo — submitted";
+      el.textContent = text;
+      document.title = "wincua form demo — " + text;
+      history.replaceState(null, "", "#submitted");
     });
   </script>
 </body>

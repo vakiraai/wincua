@@ -91,8 +91,9 @@ Open Calculator once from Start if it has never been launched on this account.
 cd path\to\wincua
 # same venv / same python as install above
 python examples/calculator_arith_demo.py
-python examples/browser_form_demo.py
+python examples/browser_form_demo.py                   # last line: golden 'OK: Ada Lovelace <ada@example.com>': PASS
 python examples/browser_form_demo.py --browser chrome
+python examples/browser_form_demo.py --dump-tree       # also print Edge's UIA tree (page Document + Edit values)
 
 # Optional: longer wait if the machine is slow
 python examples/calculator_arith_demo.py --timeout 60
@@ -105,6 +106,8 @@ $env:WINCUA_LAUNCH_TIMEOUT_S = "60"
 python examples/calculator_hitl_demo.py                 # browser UI on 127.0.0.1:8765
 python examples/calculator_hitl_demo.py --hitl cli      # answer in this terminal
 python examples/calculator_hitl_demo.py --provider scripted   # approve/reject the risky "=" press
+python examples/browser_form_demo.py --provider null          # you fill the form step by step in the UI
+python examples/browser_form_demo.py --hitl ui                # scripted; approve/reject "Submit form"
 ```
 
 With `NullProvider` the agent asks you for every step: pick a Calculator button,
@@ -152,6 +155,7 @@ python examples/calculator_llm_demo.py --provider openai
 
 # The scripted demos take the same flags
 python examples/calculator_arith_demo.py --provider ollama
+python examples/browser_form_demo.py --provider ollama
 python examples/browser_form_demo.py --provider anthropic
 ```
 
@@ -170,12 +174,22 @@ python examples/calculator_hitl_demo.py --mock --hitl cli
 `--mock` exercises the same scripted `Agent.run` loop against `MockBackend`
 (no GUI). Selecting the real windows backend off-Win32 raises a clear error.
 
-## Browser demo limits
+## Browser demo (Edge UIA)
 
-Chromium accessibility for `file://` pages is less stable than Calculator UIA.
-The demo prefers a **keyboard Tab/type/Enter** path after focusing the window.
-UIA name/`aria-label` clicks are supported by the driver but may miss focus on
-some Edge builds. See the module docstring in `examples/browser_form_demo.py`.
+`examples/fixtures/form.html` gives every control an HTML `id` (Edge exposes it
+as the UIA AutomationId) and a `<label for>` (the Edit's Name). So the fields are
+`auto:fullName` / `auto:email` / `auto:submitButton`, or `name:Full name` /
+`name:Email` / `name:Submit form`.
+
+The driver opens Edge in a new window with a throwaway profile and
+`--force-renderer-accessibility`. It scopes element lookups to the page
+Document under the `Chrome_RenderWidgetHostHWND` pane, so form text can't land
+in the address bar or the sidebar. It fills Edits through ValuePattern (falling
+back to keystrokes) and checks the value. `name:` ids prefer the Edit/Button
+over a label that has the same Name. Observations of a browser window report
+`page`, `url` and the current `fields` values. If a Windows run fails, the
+demo writes the UIA tree to `recordings/browser-form-<time>-uia.txt`; you can
+also run `python examples/_dump_uia.py "wincua form demo"` with the page open.
 
 ## Agent API sketch
 

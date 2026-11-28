@@ -48,7 +48,7 @@ def print_run(agent: Any, result: Any) -> None:
         kind = step.get("kind")
         if kind == "plan":
             calls = ", ".join(
-                f"{s['name']}({_short(s['args'])})" for s in step.get("plan_steps", [])
+                f"{s['name'] or s['kind']}({_short(s['args'] or {})})" for s in step.get("plan_steps", [])
             )
             note = f" error={step['error']!r}" if step.get("error") else ""
             print(f"  [turn {step['turn']}] {step['provider']}: {calls or '(no tool call)'}{note}")

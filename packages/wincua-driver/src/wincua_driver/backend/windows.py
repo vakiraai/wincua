@@ -483,16 +483,25 @@ def format_uia_tree(
     *,
     max_depth: int = 6,
     max_nodes: int = 200,
+    values: bool = False,
 ) -> str:
-    """Indented UIA tree dump (control_type, auto_id, name, class, process)."""
+    """Indented UIA tree dump (control_type, auto_id, name, class, process).
+
+    ``values=True`` also prints the ValuePattern value of Edit/Document nodes.
+    """
     lines: list[str] = []
     for node, depth in iter_uia_tree(root, max_depth=max_depth, max_nodes=max_nodes):
         meta = describe_uia_element(node)
         pad = "  " * depth
+        extra = ""
+        if values and meta["control_type"] in ("Edit", "ComboBox", "Document"):
+            val = uia_value(node)
+            if val is not None:
+                extra = f" value={val[:120]!r}"
         lines.append(
             f"{pad}- [{meta['control_type']}] auto_id={meta['auto_id']!r} "
             f"name={meta['name']!r} class={meta['class_name']!r} "
-            f"proc={meta['process']!r} pid={meta['pid']}"
+            f"proc={meta['process']!r} pid={meta['pid']}{extra}"
         )
     if max_nodes is not None and len(lines) >= max_nodes:
         lines.append(f"  … truncated at {max_nodes} nodes")
@@ -629,6 +638,146 @@ def pick_calculator_frame(windows: Sequence[Any]) -> Any | None:
     return None
 
 
+# Edge / Chrome: the top-level frame is Chrome_WidgetWin_1. Page content is a
+# Document element under the Chrome_RenderWidgetHostHWND pane ("Chrome Legacy
+# Window"); everything else in the frame is browser chrome (tabs, toolbar and an
+# "Address and search bar" Edit that must never receive form text).
+BROWSER_RENDER_CLASS = "Chrome_RenderWidgetHostHWND"
+EDIT_TYPES: tuple[str, ...] = ("Edit", "ComboBox")
+INVOKE_TYPES: tuple[str, ...] = (
+    "Button",
+    "Hyperlink",
+    "MenuItem",
+    "CheckBox",
+    "RadioButton",
+    "ListItem",
+    "TabItem",
+    "SplitButton",
+)
+
+
+def is_browser_window(wrapper: Any) -> bool:
+    return window_class_name(wrapper).startswith("Chrome_WidgetWin")
+
+
+def uia_control_type(wrapper: Any) -> str:
+    try:
+        return str(getattr(wrapper.element_info, "control_type", None) or "")
+    except Exception:
+        return ""
+
+
+def uia_name(wrapper: Any) -> str:
+    try:
+        return str(getattr(wrapper.element_info, "name", None) or "")
+    except Exception:
+        return ""
+
+
+def uia_value(wrapper: Any) -> str | None:
+    """ValuePattern value (Edit text, Document URL); None when the control has none."""
+    for getter in (lambda w: w.get_value(), lambda w: w.iface_value.CurrentValue):
+        try:
+            val = getter(wrapper)
+        except Exception:
+            continue
+        if val is not None:
+            return str(val)
+    return None
+
+
+def _uia_parent(node: Any) -> Any | None:
+    try:
+        return node.parent()
+    except Exception:
+        return None
+
+
+def ancestor_chain(node: Any, *, limit: int = 12) -> str:
+    """``Window[Chrome_WidgetWin_1] > Pane[…] > Document`` (best effort, for dumps)."""
+    parts: list[str] = []
+    cur: Any | None = node
+    while cur is not None and len(parts) < limit:
+        cls = window_class_name(cur)
+        parts.append(f"{uia_control_type(cur) or '?'}" + (f"[{cls}]" if cls else ""))
+        cur = _uia_parent(cur)
+    return " > ".join(reversed(parts))
+
+
+def list_browser_documents(window: Any, *, max_nodes: int = 4000) -> list[tuple[Any, str]]:
+    """``(Document, parent class)`` pairs in tree order, outermost first.
+
+    Fast path is one native FindAll (``descendants(control_type="Document")``);
+    the fallback walks ``children()`` without descending into Documents.
+    """
+    out: list[tuple[Any, str]] = []
+    try:
+        found = window.descendants(control_type="Document")
+    except Exception:
+        found = None
+    if found:
+        for doc in found:
+            parent = _uia_parent(doc)
+            out.append((doc, window_class_name(parent) if parent is not None else ""))
+        return out
+    stack: list[tuple[Any, str]] = [(child, window_class_name(window)) for child in reversed(_uia_direct_children(window))]
+    seen = 0
+    while stack and seen < max_nodes:
+        node, parent_cls = stack.pop()
+        seen += 1
+        if uia_control_type(node) == "Document":
+            out.append((node, parent_cls))
+            continue
+        cls = window_class_name(node)
+        stack.extend((child, cls) for child in reversed(_uia_direct_children(node)))
+    return out
+
+
+def find_browser_document(window: Any, title_hint: str | None = None) -> Any | None:
+    """The page's Document: named like ``title_hint`` and/or hosted by the render widget."""
+    hint = (title_hint or "").strip().lower()
+    best: Any | None = None
+    best_score = -1
+    for doc, parent_cls in list_browser_documents(window):
+        score = 0
+        if BROWSER_RENDER_CLASS in (parent_cls, window_class_name(doc)):
+            score += 2
+        name = uia_name(doc).lower()
+        if hint and name and (hint in name or name in hint):
+            score += 4
+        if score > best_score:
+            best, best_score = doc, score
+    return best
+
+
+def find_named_preferring(root: Any, name: str, prefer: Sequence[str]) -> Any | None:
+    """Exact-Name match whose control type is first in ``prefer``.
+
+    A form label ("Full name", Text) and its input ("Full name", Edit) share the
+    Name; typing must land on the Edit and invoking on the Button.
+    """
+    matches: list[Any] = []
+    try:
+        matches = list(root.descendants(title=name))
+    except Exception:
+        matches = []
+    if not matches:
+        matches = [n for n, _d in iter_uia_tree(root, include_root=False) if uia_name(n) == name]
+    for ct in prefer:
+        for node in matches:
+            if uia_control_type(node) == ct:
+                return node
+    return None
+
+
+_SEND_KEYS_SPECIAL = re.compile(r"([+^%~(){}\[\]])")
+
+
+def escape_send_keys(text: str) -> str:
+    """Literal text for pywinauto send_keys/type_keys (``+^%~(){}[]`` are modifiers/groups)."""
+    return _SEND_KEYS_SPECIAL.sub(r"{\1}", text)
+
+
 # COM / UIA HRESULTs that usually clear up on retry: the element went stale
 # (Calculator re-creates buttons) or the UIA provider was busy.
 TRANSIENT_HRESULTS: dict[int, str] = {
@@ -668,6 +817,18 @@ def describe_com_error(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+def _candidate_ids(args: dict[str, Any]) -> list[str]:
+    """Ids to try in order: element_id, then auto:<auto_id>, then name:<name>."""
+    ids: list[str] = []
+    if args.get("element_id"):
+        ids.append(str(args["element_id"]))
+    if args.get("auto_id"):
+        ids.append(f"auto:{args['auto_id']}")
+    if args.get("name"):
+        ids.append(f"name:{args['name']}")
+    return list(dict.fromkeys(ids))
+
+
 class WindowsBackend:
     """pywinauto/UIA backend. Instantiation fails clearly off Windows."""
 
@@ -703,6 +864,7 @@ class WindowsBackend:
         self._elements: dict[str, ElementRef] = {}
         self._wrappers: dict[str, Any] = {}
         self._window: Any = None
+        self._content_root: Any = None
         self._target_title: str | None = None
         self._id_seq = 0
         self._temp_profile_dirs: list[str] = []
@@ -873,12 +1035,30 @@ class WindowsBackend:
         self._window = window
         if title:
             self._target_title = title
+        self._content_root = None
+        root = window
+        if is_browser_window(window):
+            doc = find_browser_document(window, title or self._target_title)
+            if doc is not None:
+                self._content_root = root = doc
         # Prefetch via the shared children() walk (same as dump) so UWP Calculator
         # buttons under CoreWindow → NavView → LandmarkTarget are cached.
         try:
-            self._walk_uia(window, limit=500)
+            self._walk_uia(root, limit=500)
         except Exception:
             pass
+
+    def _browser_content(self) -> Any | None:
+        """Page Document of the bound browser window (looked up again if it was not ready)."""
+        doc = getattr(self, "_content_root", None)
+        if doc is not None or self._window is None or not is_browser_window(self._window):
+            return doc
+        doc = find_browser_document(self._window, self._target_title)
+        self._content_root = doc
+        return doc
+
+    def _is_browser_bound(self) -> bool:
+        return self._window is not None and is_browser_window(self._window)
 
     def _bind_target(self, target: str) -> None:
         """Bind ``target`` unless it is already the bound window.
@@ -909,10 +1089,13 @@ class WindowsBackend:
                 window.restore()
         except Exception:
             pass
-        try:
-            window.restore()
-        except Exception:
-            pass
+        # SW_RESTORE would un-maximize a browser; it only needs the foreground.
+        browser = is_browser_window(window)
+        if not browser:
+            try:
+                window.restore()
+            except Exception:
+                pass
         try:
             window.set_focus()
         except Exception:
@@ -923,7 +1106,8 @@ class WindowsBackend:
             import win32gui  # type: ignore
 
             hwnd = int(window.handle)
-            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            if not browser:
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
             try:
                 win32gui.SetForegroundWindow(hwnd)
             except Exception:
@@ -1189,8 +1373,11 @@ class WindowsBackend:
                 if auto_id:
                     self._wrappers[f"auto:{auto_id}"] = wrapper
                     self._elements[f"auto:{auto_id}"] = ref
-                if name:
-                    self._wrappers[f"name:{name}"] = wrapper
+                name_key = f"name:{name}"
+                if name and (
+                    name_key not in self._wrappers or str(role) in EDIT_TYPES or str(role) in INVOKE_TYPES
+                ):
+                    self._wrappers[name_key] = wrapper
                 refs.append(ref)
             except Exception:
                 return
@@ -1215,6 +1402,7 @@ class WindowsBackend:
             seen.add(key)
             roots.append(w)
 
+        add(self._browser_content())
         add(self._window)
         title = (self._target_title or "").lower()
         if "calculator" in title or not roots:
@@ -1222,11 +1410,33 @@ class WindowsBackend:
                 add(w)
         return roots
 
-    def _resolve_wrapper(self, element_id: str | None) -> Any | None:
+    def _resolve_first(
+        self, candidates: Sequence[str], *, prefer: Sequence[str] = ()
+    ) -> str | None:
+        """First candidate id (element_id, auto:…, name:…) that resolves; else the last one.
+
+        The last candidate is returned unresolved so the caller's own lookup
+        produces the usual element_not_found error.
+        """
+        ids = list(dict.fromkeys(c for c in candidates if c))
+        for eid in ids[:-1]:
+            if self._resolve_wrapper(eid, prefer=prefer) is not None:
+                return eid
+        return ids[-1] if ids else None
+
+    def _resolve_wrapper(self, element_id: str | None, *, prefer: Sequence[str] = ()) -> Any | None:
         if not element_id:
             return None
-        if element_id in self._wrappers:
-            w = self._wrappers[element_id]
+        cached = self._wrappers.get(element_id)
+        if cached is not None and prefer and element_id.startswith("name:") and uia_control_type(cached) not in prefer:
+            for root in self._search_roots():
+                better = find_named_preferring(root, element_id[5:], prefer)
+                if better is not None:
+                    self._wrappers[element_id] = better
+                    cached = better
+                    break
+        if cached is not None:
+            w = cached
             try:
                 if not hasattr(w, "exists") or w.exists(timeout=0.5):
                     return w
@@ -1255,6 +1465,12 @@ class WindowsBackend:
         if element_id.startswith("name:"):
             name = element_id[5:]
             prefix = name == "Display is" or name.startswith("Display is")
+            if prefer:
+                for root in roots:
+                    ctrl = find_named_preferring(root, name, prefer)
+                    if ctrl is not None:
+                        self._wrappers[element_id] = ctrl
+                        return ctrl
             for root in roots:
                 # Exact title / name, then contains (aria-label often duplicates)
                 for kwargs in (
@@ -1352,7 +1568,9 @@ class WindowsBackend:
             if not uia:
                 uia = self._walk_uia(window)
 
-        if "app" in include:
+        if "app" in include and is_browser_window(window):
+            app = self._browser_app_state(target, window)
+        elif "app" in include:
             display = None
             for root in self._search_roots():
                 for key in ("CalculatorResults", "CalculatorExpression"):
@@ -1403,6 +1621,80 @@ class WindowsBackend:
                 )
 
         return Observation(uia=uia, screenshot=screenshot, app=app, errors=errors)
+
+    def _browser_app_state(self, target: str, window: Any) -> dict[str, Any]:
+        """Title, page Document name/URL and current Edit values of a browser window."""
+        app: dict[str, Any] = {"target": target, "title": window_title_of(window), "display": None}
+        doc = self._browser_content()
+        if doc is None:
+            app["page"] = None
+            app["note"] = (
+                "page Document not found in the UIA tree yet (Chromium accessibility may still be "
+                "starting); observe again"
+            )
+            return app
+        app["page"] = uia_name(doc)
+        url = uia_value(doc)
+        if url:
+            app["url"] = url
+        fields: dict[str, str] = {}
+        for eid, ref in self._elements.items():
+            if eid.startswith(("auto:", "name:")) or ref.role not in EDIT_TYPES:
+                continue
+            value = uia_value(self._wrappers[eid]) if eid in self._wrappers else None
+            fields[ref.name or ref.auto_id or eid] = value or ""
+            if len(fields) >= 12:
+                break
+        if fields:
+            app["fields"] = fields
+        return app
+
+    async def dump_tree(self, target: str, *, max_nodes: int = 400) -> str:
+        """Plain-text UIA diagnostics for ``target`` (windows list, frame, page Document subtree)."""
+        return await asyncio.to_thread(self._dump_tree_sync, target, max_nodes)
+
+    def _dump_tree_sync(self, target: str, max_nodes: int) -> str:
+        lines = [f"=== wincua UIA dump: target={target!r} ===", "--- visible top-level windows ---"]
+        for w in self._list_windows_sync():
+            lines.append(
+                f"  {w['title']!r} proc={w['process']!r} class={w['class_name']!r}"
+                + (" [foreground]" if w.get("foreground") else "")
+            )
+        window = self._find_window(target, timeout_s=2.0)
+        if window is None:
+            lines.append(f"(no window title contains {target!r})")
+            return "\n".join(lines)
+        meta = describe_uia_element(window)
+        lines.append(
+            f"--- matched window title={meta['name']!r} class={meta['class_name']!r} "
+            f"proc={meta['process']!r} pid={meta['pid']} (frame, depth 4) ---"
+        )
+        lines.append(format_uia_tree(window, max_depth=4, max_nodes=80))
+        if not is_browser_window(window):
+            lines.append("--- full tree ---")
+            lines.append(format_uia_tree(window, max_depth=30, max_nodes=max_nodes, values=True))
+            return "\n".join(lines)
+        docs = list_browser_documents(window)
+        lines.append(
+            f"--- Document elements: {len(docs)} (page content should sit under {BROWSER_RENDER_CLASS}) ---"
+        )
+        for i, (doc, parent_cls) in enumerate(docs[:6]):
+            lines.append(
+                f"  [{i}] name={uia_name(doc)!r} parent_class={parent_cls!r} url={uia_value(doc)!r}\n"
+                f"       path: {ancestor_chain(doc)}"
+            )
+        chosen = find_browser_document(window, target)
+        if chosen is None:
+            lines.append(
+                "(no Document found: Chromium accessibility is probably off. wincua launches Edge with "
+                "--force-renderer-accessibility; if Edge was already running with this profile, close it)"
+            )
+            lines.append("--- full frame tree ---")
+            lines.append(format_uia_tree(window, max_depth=30, max_nodes=max_nodes))
+            return "\n".join(lines)
+        lines.append(f"--- chosen page Document {uia_name(chosen)!r}: subtree with Edit values ---")
+        lines.append(format_uia_tree(chosen, max_depth=30, max_nodes=max_nodes, values=True))
+        return "\n".join(lines)
 
     async def act(self, action: Action, *, dry_run: bool = False) -> ActionResult:
         return await asyncio.to_thread(self._act_sync, action, dry_run)
@@ -1457,15 +1749,40 @@ class WindowsBackend:
 
         mouse.click(coords=(x, y))
 
-    def _invoke(self, element_id: str) -> ActionResult:
+    def _not_found(self, element_id: str) -> ActionResult:
+        tree = self._short_tree_dump(self._search_roots(), max_depth=25 if self._is_browser_bound() else 6)
+        if self._is_browser_bound():
+            where = (
+                "Searched the page Document (under Chrome_RenderWidgetHostHWND), then the browser "
+                "frame. Use an id from the latest observation (auto:<html id> or name:<label>)."
+            )
+        else:
+            where = (
+                "Tried ApplicationFrameHost + CalculatorApp.exe roots and EN name fallbacks. "
+                "Is the window focused and UIA ready?"
+            )
+        return ActionResult(
+            ok=False,
+            mode_used="windows",
+            error=StructuredError(
+                code="element_not_found",
+                message=(
+                    f"No element for id={element_id!r} in target={self._target_title!r}. {where}\n"
+                    f"UIA tree dump:\n{tree}"
+                ),
+                details={"element_id": element_id, "visible": self._visible_titles(), "tree": tree},
+            ),
+        )
+
+    def _invoke(self, element_id: str, *, prefer: Sequence[str] = INVOKE_TYPES) -> ActionResult:
         try:
-            wrapper = self._resolve_wrapper(element_id)
+            wrapper = self._resolve_wrapper(element_id, prefer=prefer)
         except Exception as exc:
             if not transient_uia_error(exc):
                 raise
             time.sleep(self.invoke_retry_delay_s)
             self._forget_wrapper(element_id)
-            wrapper = self._resolve_wrapper(element_id)
+            wrapper = self._resolve_wrapper(element_id, prefer=prefer)
         # Calculator clear fallback: Escape when neither clear button exists
         if wrapper is None and element_id in ("auto:clearButton", "auto:clearEntryButton"):
             try:
@@ -1494,26 +1811,7 @@ class WindowsBackend:
                     ),
                 )
         if wrapper is None:
-            tree = self._short_tree_dump(self._search_roots())
-            return ActionResult(
-                ok=False,
-                mode_used="windows",
-                error=StructuredError(
-                    code="element_not_found",
-                    message=(
-                        f"No element for id={element_id!r} in "
-                        f"target={self._target_title!r}. "
-                        "Tried ApplicationFrameHost + CalculatorApp.exe roots and "
-                        "EN name fallbacks. Is Calculator focused and UIA ready?\n"
-                        f"UIA tree dump:\n{tree}"
-                    ),
-                    details={
-                        "element_id": element_id,
-                        "visible": self._visible_titles(),
-                        "tree": tree,
-                    },
-                ),
-            )
+            return self._not_found(element_id)
         return self._invoke_wrapper(element_id, wrapper)
 
     def _invoke_wrapper(self, element_id: str, wrapper: Any) -> ActionResult:
@@ -1558,16 +1856,9 @@ class WindowsBackend:
 
     def _click(self, action: Click) -> ActionResult:
         if action.element_id:
-            wrapper = self._resolve_wrapper(action.element_id)
+            wrapper = self._resolve_wrapper(action.element_id, prefer=INVOKE_TYPES + EDIT_TYPES)
             if wrapper is None:
-                return ActionResult(
-                    ok=False,
-                    mode_used="windows",
-                    error=StructuredError(
-                        code="element_not_found",
-                        message=f"No element for id={action.element_id!r}",
-                    ),
-                )
+                return self._not_found(action.element_id)
             wrapper.click_input()
             return ActionResult(ok=True, mode_used="windows")
         if action.x is not None and action.y is not None:
@@ -1617,30 +1908,21 @@ class WindowsBackend:
             pass
         try:
             # Select-all then type for stubborn edits
-            from pywinauto.keyboard import send_keys
-
-            wrapper.type_keys("^a{BACKSPACE}" + text, with_spaces=True)
+            wrapper.type_keys("^a{BACKSPACE}" + escape_send_keys(text), with_spaces=True)
             return "type_keys"
         except Exception:
             from pywinauto.keyboard import send_keys
 
-            send_keys("^a{BACKSPACE}" + text, with_spaces=True)
+            send_keys("^a{BACKSPACE}" + escape_send_keys(text), with_spaces=True)
             return "send_keys"
 
-    def _type(self, action: Type) -> ActionResult:
+    def _type(self, action: Type, *, prefer: Sequence[str] = EDIT_TYPES) -> ActionResult:
         method = "send_keys"
         verified: str | None = None
         if action.element_id:
-            wrapper = self._resolve_wrapper(action.element_id)
+            wrapper = self._resolve_wrapper(action.element_id, prefer=prefer)
             if wrapper is None:
-                return ActionResult(
-                    ok=False,
-                    mode_used="windows",
-                    error=StructuredError(
-                        code="element_not_found",
-                        message=f"No element for id={action.element_id!r}",
-                    ),
-                )
+                return self._not_found(action.element_id)
             try:
                 wrapper.set_focus()
             except Exception:
@@ -1655,7 +1937,7 @@ class WindowsBackend:
                     from pywinauto.keyboard import send_keys
 
                     wrapper.set_focus()
-                    send_keys("^a{BACKSPACE}" + action.text, with_spaces=True)
+                    send_keys("^a{BACKSPACE}" + escape_send_keys(action.text), with_spaces=True)
                     time.sleep(0.05)
                     verified = self._read_value(wrapper)
                     method = "type_keys_retry"
@@ -1682,7 +1964,7 @@ class WindowsBackend:
         else:
             from pywinauto.keyboard import send_keys
 
-            send_keys(action.text, with_spaces=True)
+            send_keys(escape_send_keys(action.text), with_spaces=True)
         if action.submit:
             from pywinauto.keyboard import send_keys
 
@@ -1794,7 +2076,11 @@ class WindowsBackend:
                         ),
                     )
                 return ActionResult(ok=True, mode_used="windows")
-            self._bind_window(window, title=title)
+            if self._window is not None and self._window_key(window) == self._window_key(self._window):
+                # Already bound: re-walking would renumber the snapshot ids just observed.
+                self._target_title = title or self._target_title
+            else:
+                self._bind_window(window, title=title)
             return ActionResult(ok=True, mode_used="windows")
 
         if name in ("open_url", "browser.open"):
@@ -1808,12 +2094,8 @@ class WindowsBackend:
             )
 
         if name in ("uia.invoke", "invoke_by"):
-            eid = args.get("element_id")
-            if not eid and args.get("auto_id"):
-                eid = f"auto:{args['auto_id']}"
-            if not eid and args.get("name"):
-                eid = f"name:{args['name']}"
-            if not eid:
+            candidates = _candidate_ids(args)
+            if not candidates:
                 return ActionResult(
                     ok=False,
                     mode_used="windows",
@@ -1824,16 +2106,13 @@ class WindowsBackend:
                 )
             if args.get("target"):
                 self._bind_target(str(args["target"]))
+            eid = self._resolve_first(candidates, prefer=INVOKE_TYPES)
             return self._invoke(str(eid))
 
         if name in ("uia.type", "type_by"):
-            eid = args.get("element_id")
-            if not eid and args.get("auto_id"):
-                eid = f"auto:{args['auto_id']}"
-            if not eid and args.get("name"):
-                eid = f"name:{args['name']}"
             if args.get("target"):
                 self._bind_target(str(args["target"]))
+            eid = self._resolve_first(_candidate_ids(args), prefer=EDIT_TYPES)
             text = str(args.get("text") or "")
             return self._type(
                 Type(
@@ -2134,6 +2413,9 @@ class WindowsBackend:
                     "--no-first-run",
                     "--no-default-browser-check",
                     "--disable-features=TranslateUI",
+                    # Build the page accessibility tree up front instead of lazily
+                    # when Chromium notices a UIA client (empty Document otherwise).
+                    "--force-renderer-accessibility",
                     url,
                 ]
             )
@@ -2179,11 +2461,18 @@ class WindowsBackend:
             if t
         ]
 
+        generic_hints = {"Edge", "Chrome"}
         window = None
         matched_hint = None
-        deadline = time.time() + timeout
+        started_at = time.time()
+        deadline = started_at + timeout
         while time.time() < deadline and window is None:
+            # A bare "Edge" title would also match the user's own browser windows;
+            # only fall back to it late, if the page title never showed up.
+            late = time.time() - started_at > timeout * 0.6
             for hint in title_hints:
+                if hint in generic_hints and not late:
+                    continue
                 window = self._find_window_once(str(hint))
                 if window is not None:
                     # Prefer a window that does NOT say "and N more page" (multi-tab reuse)
@@ -2224,7 +2513,9 @@ class WindowsBackend:
                 ),
             )
 
-        self._bind_window(window, title=str(matched_hint or title_hints[0]))
+        hint = str(matched_hint or title_hints[0])
+        doc_ready = self._wait_browser_document(window, hint, timeout_s=min(15.0, max(3.0, deadline - time.time())))
+        self._bind_window(window, title=hint)
         try:
             window.set_focus()
         except Exception:
@@ -2236,6 +2527,19 @@ class WindowsBackend:
                 "browser": str(started),
                 "profile_dir": profile_dir,
                 "new_window": new_window,
-                "title": window_title_of(window) or str(matched_hint or title_hints[0]),
+                "title": window_title_of(window) or hint,
+                "document": uia_name(self._content_root) if self._content_root is not None else None,
+                "document_ready": doc_ready,
             },
         )
+
+    def _wait_browser_document(self, window: Any, title_hint: str, *, timeout_s: float) -> bool:
+        """Wait until the page Document exists and has content (Chromium builds it asynchronously)."""
+        deadline = time.time() + timeout_s
+        while True:
+            doc = find_browser_document(window, title_hint)
+            if doc is not None and _uia_direct_children(doc):
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.3)

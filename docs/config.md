@@ -148,7 +148,7 @@ point, UIA timeout and RPC disconnected/busy.
 ```toml
 [driver]
 backend = "windows"     # windows | mock | null (omit = auto: windows on Win32)
-allow = ["CalculatorApp.exe", "ApplicationFrameHost.exe", "calc.exe"]
+allow = ["CalculatorApp.exe", "ApplicationFrameHost.exe", "calc.exe", "msedge.exe"]
 launch_timeout_s = 45
 ```
 
