@@ -43,12 +43,41 @@ def load_demo_config(args: argparse.Namespace) -> Any | None:
     return cfg
 
 
+async def preflight(cfg: Any, provider: str | None, *, warm_up: bool = True) -> bool:
+    """Probe the chain and load the first model; one line per provider. True if the first is usable."""
+    import time
+
+    from wincua.config import probe_chain
+    from wincua_providers import build_provider
+    from wincua_providers.fallback import short_reason
+
+    results = await probe_chain(cfg, provider)
+    for name, ok, detail in results:
+        print(f"  [{'ok' if ok else 'unavailable'}] {name}: {short_reason(detail)}")
+    if not results:
+        return False
+    first, ok, _detail = results[0]
+    if not ok:
+        if first != "null":
+            print(f"  [wincua] {first} will be skipped; the run falls back to the next provider in the chain.")
+        return False
+    pc = cfg.provider_config(first)
+    if not warm_up or pc.type != "ollama":
+        return True
+    prov = build_provider(pc.type, pc.settings(), retries=0)
+    print(f"  loading {first} model {getattr(prov, 'model', '?')!r} (first load can take a minute) ...")
+    t0 = time.monotonic()
+    ok, detail = await prov.warm_up()
+    print(f"  [{'ok' if ok else 'unavailable'}] {first}: {short_reason(detail)} ({time.monotonic() - t0:.1f}s)")
+    return ok
+
+
 def print_run(agent: Any, result: Any) -> None:
     for step in result.steps:
         kind = step.get("kind")
         if kind == "plan":
             calls = ", ".join(
-                f"{s['name']}({_short(s['args'])})" for s in step.get("plan_steps", [])
+                f"{s['name'] or s['kind']}({_short(s['args'] or {})})" for s in step.get("plan_steps", [])
             )
             note = f" error={step['error']!r}" if step.get("error") else ""
             print(f"  [turn {step['turn']}] {step['provider']}: {calls or '(no tool call)'}{note}")

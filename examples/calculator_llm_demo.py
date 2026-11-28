@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _llm_common import (  # noqa: E402
     add_provider_args,
     load_demo_config,
+    preflight,
     print_run,
     verify_visible,
 )
@@ -58,6 +59,7 @@ ALLOW = [
 async def run_with_model(args: argparse.Namespace, backend: str, cfg) -> int:
     from wincua import Agent
 
+    await preflight(cfg, args.provider)
     agent = Agent(
         task=TASK,
         provider=args.provider,
@@ -95,10 +97,7 @@ async def main(argv: list[str] | None = None) -> int:
     if cfg is None:
         return 1
     if args.check:
-        from wincua.config import probe_chain
-
-        for name, ok, detail in await probe_chain(cfg, args.provider):
-            print(f"  [{'ok' if ok else 'unavailable'}] {name}: {detail}")
+        await preflight(cfg, args.provider)
         return 0
 
     from wincua_driver import is_windows

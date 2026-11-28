@@ -4,12 +4,15 @@
 Usage (on the Windows host with the app open)::
 
     python examples/_dump_uia.py "Calculator"
+    python examples/_dump_uia.py "wincua form demo"     # Edge/Chrome page
 
 Prints:
   - matching top-level window trees (depth ~6)
+  - for Edge/Chrome windows: every Document (path, URL) and the page Document
+    subtree with Edit values, i.e. what the driver searches
   - every top-level window owned by CalculatorApp.exe
 
-Paste the full output when reporting Calculator / UIA lookup failures.
+Paste the full output when reporting Calculator / browser UIA lookup failures.
 """
 
 from __future__ import annotations
@@ -48,16 +51,22 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     from wincua_driver.backend.windows import (
+        ancestor_chain,
         describe_uia_element,
+        find_browser_document,
         find_core_window,
         format_uia_tree,
+        is_browser_window,
         is_calculator_frame,
         is_calculator_target,
         is_windows,
+        list_browser_documents,
         list_toplevel_by_process,
         match_window_title,
         pick_calculator_frame,
         probe_pywinauto,
+        uia_name,
+        uia_value,
         windows_unavailable_error,
     )
 
@@ -121,6 +130,19 @@ def main(argv: list[str] | None = None) -> int:
             f"class={meta['class_name']!r} ---"
         )
         print(format_uia_tree(w, max_depth=args.depth, max_nodes=args.max_nodes))
+        if is_browser_window(w):
+            docs = list_browser_documents(w)
+            print(f"\n    Documents in this browser window: {len(docs)}")
+            for i, (doc, parent_cls) in enumerate(docs):
+                print(f"    [{i}] name={uia_name(doc)!r} parent_class={parent_cls!r} url={uia_value(doc)!r}")
+                print(f"        path: {ancestor_chain(doc)}")
+            page = find_browser_document(w, title)
+            if page is None:
+                print("    (no page Document: Chromium accessibility is off; relaunch via the demo, "
+                      "which passes --force-renderer-accessibility)")
+            else:
+                print(f"\n    --- page Document {uia_name(page)!r} (what the driver searches) ---")
+                print(format_uia_tree(page, max_depth=30, max_nodes=args.max_nodes * 2, values=True))
 
     if matched == 0:
         print("(no title matches)")

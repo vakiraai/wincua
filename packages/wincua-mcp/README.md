@@ -18,9 +18,15 @@ Built on the official [`mcp`](https://pypi.org/project/mcp/) Python SDK (FastMCP
 | `act` | One action on the current (or given) target: `click` (element or x/y), `type` (optional `element_id`, `submit`), `invoke` (UIA Invoke), `key` (`"enter"`, `"ctrl+a"`). `dry_run=true` checks policy only |
 | `ask_human` | Ask the person at the desktop via the wincua HITL channel. Returns `answered: false` on timeout or when no HITL UI is available |
 
-Element ids come from `observe`. The driver also accepts `auto:<AutomationId>`
-(for example `auto:num7Button` in Calculator) and `name:<Name>` (for example
-`name:Submit form`). Errors come back as `{"ok": false, "error": {"code", "message"}}`, with codes
+Element ids come from `observe`, and they stay valid across later observations:
+`auto:<AutomationId>` when the control has one (`auto:num7Button` in Calculator,
+`auto:fullName` for an HTML `id="fullName"` in Edge), otherwise `name:<Name>`
+(`name:Submit form`), otherwise a per-observation snapshot id. When a label and its
+input share a Name, `name:` refers to the input. `type` resolves `name:` ids to an Edit
+and `invoke` resolves them to a Button. In Edge/Chrome, lookups are limited to the page
+Document, so the address bar is never targeted. Browser observations also report
+`app.page`, `app.url` and `app.fields` (current Edit values). If the page retitles
+the window (for example on submit), the current target follows the same window. Errors come back as `{"ok": false, "error": {"code", "message"}}`, with codes
 such as `allow_list_empty`, `allow_list_denied`, `window_not_found`,
 `confirmation_denied` and `backend_unavailable`.
 
@@ -53,10 +59,10 @@ With `require_confirmation = true` (the default), a risky action blocks on
 channel denies it. If `wincua_hitl` isn't installed, a stub hook is used, and it
 always denies.
 
-> **Current limitation:** the `wincua-hitl` local UI is still a stub that returns no answer, so
-> risky actions are **denied** until it ships. For trusted local demos, set
-> `require_confirmation = false` or pass `--no-require-confirmation`. Non-risky actions, such as
-> Calculator button invokes and typing without submit, are unaffected.
+With `wincua-hitl` installed, the question appears as an Approve/Reject card in the
+local HITL page (`http://127.0.0.1:8765`, opened in your browser). `[hitl] mode = "cli"`
+is replaced by that page, because stdin is the MCP channel. For trusted local demos
+you can set `require_confirmation = false` or pass `--no-require-confirmation`.
 
 ## Configuration (`[mcp]` in `wincua.toml`)
 
@@ -174,9 +180,34 @@ Expected calls:
 3. `act(action="invoke", element_id="auto:num1Button")` and so on
 4. `observe()`, where `app.display` reads `Display is 42`
 
+#### Browser form (MVP demo A)
+
+The allow-list needs `msedge.exe` (it is in `wincua.example.toml` and in the setup
+snippet above). Use the absolute path of your checkout. Paste this prompt into Cursor
+agent chat:
+
+> Use the wincua MCP tools. Open `C:\src\wincua\examples\fixtures\form.html` in Edge with
+> `launch(url=..., title="wincua form demo")`. Observe the page with
+> `roles=["Edit","Button"]`. Type `Ada Lovelace` into the Full name field and
+> `ada@example.com` into the Email field, using the element ids from observe. Then invoke
+> the Submit form button; it needs my approval in the wincua HITL page. Finally observe
+> again and tell me the exact result text on the page.
+
+Expected calls:
+
+1. `launch(url="C:\\src\\wincua\\examples\\fixtures\\form.html", title="wincua form demo")`. The driver turns the path into `file:///…`, opens a new Edge window with a throwaway profile, and waits for the page Document.
+2. `observe(roles=["Edit","Button"])` lists `auto:fullName` (Edit "Full name"), `auto:email` (Edit "Email") and `auto:submitButton` (Button "Submit form").
+3. `act(action="type", element_id="auto:fullName", text="Ada Lovelace")` and `act(action="type", element_id="auto:email", text="ada@example.com")`. Each returns `info.verified` with the value read back from the field.
+4. `act(action="invoke", element_id="auto:submitButton")`. This is risky, so the HITL page shows an Approve/Reject card. After Approve, the result has `confirmation.approved: true`.
+5. `observe(name_contains="OK:")` shows the element `OK: Ada Lovelace <ada@example.com>`, and `app.url` ends in `#submitted`.
+
+If step 2 lists no Edits, the page's accessibility tree is not ready (or not where the
+driver looks). Run `python examples/_dump_uia.py "wincua form demo"` with the page still
+open, and attach the output.
+
 ## Development
 
 ```bash
 python -m pytest packages/wincua-mcp     # mock backend + in-process MCP client, stdio round-trip
-wincua-mcp --backend mock --allow calc   # poke at it from any OS
+wincua-mcp --backend mock --allow calc --allow msedge.exe   # poke at it from any OS (fake Calculator + form)
 ```

@@ -50,7 +50,7 @@ def test_ollama_plans_calculator_on_mock():
         ),
     )
     t.add(200, ollama_tool_reply(("done", {"message": "42 is shown"})))
-    cfg = parse_config({"provider": {"default": "ollama"}})
+    cfg = parse_config({"provider": {"default": "ollama"}, "providers": {"ollama": {"model": "qwen2.5:7b"}}})
     agent = _calc_agent(cfg.build_provider(transport=t))
 
     result = asyncio.run(agent.run())
@@ -80,7 +80,7 @@ def test_text_only_replies_get_a_nudge_then_give_up():
     t = FakeTransport()
     for _ in range(3):
         t.add(200, {"message": {"role": "assistant", "content": "thinking..."}})
-    cfg = parse_config({"provider": {"default": "ollama"}})
+    cfg = parse_config({"provider": {"default": "ollama"}, "providers": {"ollama": {"model": "qwen2.5:7b"}}})
     agent = _calc_agent(cfg.build_provider(transport=t), max_consecutive_errors=3)
     result = asyncio.run(agent.run())
     escalations = [s for s in result.steps if s["kind"] == "escalate"]

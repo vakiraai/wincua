@@ -17,11 +17,13 @@ from wincua_providers.prompting import (
     NUDGE,
     clean_args,
     group_history,
+    json_turn_messages,
     orphan_notes,
     screenshot_b64,
     user_turn_text,
 )
 from wincua_providers.tools import (
+    JSON_REMINDER,
     json_mode_instructions,
     openai_tools,
     parse_arguments,
@@ -55,7 +57,7 @@ class OpenAICompatProvider(HTTPChatProvider):
                 continue
             if turn.text is not None and not turn.calls:
                 messages.append({"role": "assistant", "content": turn.text})
-                messages.append({"role": "user", "content": NUDGE})
+                messages.append({"role": "user", "content": NUDGE if native else JSON_REMINDER})
                 continue
             if native:
                 messages.append(
@@ -80,15 +82,10 @@ class OpenAICompatProvider(HTTPChatProvider):
                         {"role": "tool", "tool_call_id": c.call_id, "content": c.result}
                     )
             else:
-                for c in turn.calls:
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": json.dumps({"tool": c.name, "args": clean_args(c.args)}),
-                        }
-                    )
-                    messages.append({"role": "user", "content": f"Result of {c.name}: {c.result}"})
+                messages.extend(json_turn_messages(turn))
         text = user_turn_text(task, observation, first=not turns, notes=orphan_notes(turns))
+        if not native:
+            text = f"{text}\n\n{JSON_REMINDER}"
         img = screenshot_b64(observation) if self.send_screenshot else None
         if img:
             content: Any = [

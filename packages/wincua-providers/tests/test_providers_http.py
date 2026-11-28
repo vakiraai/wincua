@@ -58,7 +58,7 @@ HISTORY = [
 
 def test_ollama_native_chat_with_image_and_tools():
     t = FakeTransport().add(200, ollama_tool_reply(("invoke", {"auto_id": "num1Button"}), ("done", {"message": "42"})))
-    p = OllamaProvider(model="qwen2.5vl:7b", transport=t)
+    p = OllamaProvider(model="qwen3-vl:8b", send_screenshot=True, transport=t)
     res = run(p.plan(task="calc", observation=calc_obs(), history=[]))
     assert res.available and res.provider == "ollama"
     assert [(s.kind, s.name) for s in res.steps] == [("tool", "invoke"), ("done", "done")]
@@ -66,7 +66,7 @@ def test_ollama_native_chat_with_image_and_tools():
     assert res.steps[1].message == "42"
     req = t.requests[0]
     assert req.url == "http://127.0.0.1:11434/api/chat"
-    assert req.body["model"] == "qwen2.5vl:7b" and req.body["stream"] is False
+    assert req.body["model"] == "qwen3-vl:8b" and req.body["stream"] is False
     assert {tool["function"]["name"] for tool in req.body["tools"]} >= {"invoke", "type", "done"}
     last = req.body["messages"][-1]
     assert last["role"] == "user" and last["images"] and "auto:num1Button" in last["content"]
@@ -75,7 +75,7 @@ def test_ollama_native_chat_with_image_and_tools():
 
 def test_ollama_history_renders_tool_messages():
     t = FakeTransport().add(200, ollama_tool_reply(("done", {"message": "ok"})))
-    p = OllamaProvider(transport=t)
+    p = OllamaProvider(model="qwen2.5:7b", transport=t)
     run(p.plan(task="calc", observation=calc_obs(), history=HISTORY))
     msgs = t.requests[0].body["messages"]
     roles = [m["role"] for m in msgs]
@@ -87,16 +87,17 @@ def test_ollama_history_renders_tool_messages():
 def test_ollama_falls_back_to_json_mode_when_model_lacks_tools():
     t = (
         FakeTransport()
-        .add(400, {"error": "registry.ollama.ai/library/qwen2.5vl:7b does not support tools"})
+        .add(400, {"error": "registry.ollama.ai/library/some-vlm:7b does not support tools"})
         .add(200, {"message": {"role": "assistant", "content": '{"tool": "launch", "args": {"app": "calculator"}}'}})
     )
-    p = OllamaProvider(transport=t)
+    p = OllamaProvider(model="some-vlm:7b", transport=t)
+    assert p.tool_mode == "auto"
     res = run(p.plan(task="calc", observation=calc_obs()))
     assert res.available and res.steps[0].name == "launch"
     assert p.tool_mode == "json"
     second = t.requests[1].body
-    assert "tools" not in second and second["format"] == "json"
-    assert "Respond with ONLY a JSON object" in second["messages"][0]["content"]
+    assert "tools" not in second and second["format"]["required"] == ["actions"]
+    assert "Reply format: ONLY a JSON object" in second["messages"][0]["content"]
 
 
 def test_ollama_missing_model_is_unavailable_with_pull_hint():
@@ -118,7 +119,7 @@ def test_ollama_text_reply_without_tool_call():
 
 
 def test_ollama_probe_checks_model_is_pulled():
-    t = FakeTransport().add(200, {"models": [{"name": "qwen2.5:7b"}]}).add(200, {"models": []})
+    t = FakeTransport().add(200, {"models": [{"name": "qwen2.5vl:7b"}]}).add(200, {"models": []})
     p = OllamaProvider(transport=t)
     assert run(p.probe())[0] is True
     ok, detail = run(p.probe())

@@ -84,11 +84,15 @@ def backend(monkeypatch, tmp_path):
     return be
 
 
-def run_agent(replies: list[dict], **kw):
+def _cfg(model: str):
+    return parse_config({"provider": {"default": "ollama", "fallback": ["null"]}, "providers": {"ollama": {"model": model}}})
+
+
+def run_agent(replies: list[dict], model: str = "qwen2.5:7b", **kw):
     t = FakeTransport()
     for r in replies:
         t.add(200, r)
-    cfg = parse_config({"provider": {"default": "ollama", "fallback": ["null"]}})
+    cfg = _cfg(model)
     agent = Agent(
         task="compute 17 + 25",
         provider=cfg.build_provider(transport=t),
@@ -180,11 +184,11 @@ def _json_reply(obj: dict) -> dict:
     return {"model": "qwen2.5vl:7b", "message": {"role": "assistant", "content": json.dumps(obj)}, "done": True}
 
 
-def run_replies(replies: list[tuple[int, dict]], **kw):
+def run_replies(replies: list[tuple[int, dict]], model: str = "qwen2.5:7b", **kw):
     t = FakeTransport()
     for status, body in replies:
         t.add(status, body)
-    cfg = parse_config({"provider": {"default": "ollama", "fallback": ["null"]}})
+    cfg = _cfg(model)
     agent = Agent(
         task="compute 17 + 25",
         provider=cfg.build_provider(transport=t),
@@ -198,20 +202,19 @@ def run_replies(replies: list[tuple[int, dict]], **kw):
 
 
 def test_json_mode_nested_batch_is_flattened(backend):
-    # qwen2.5vl has no tool support: Ollama refuses tools, wincua switches to JSON replies.
-    no_tools = (400, {"error": "registry.ollama.ai/library/qwen2.5vl:7b does not support tools"})
+    # qwen2.5vl has no tool support: wincua starts it in JSON-reply mode.
     replies = [
-        no_tools,
         (200, _json_reply({"tool": "invoke", "args": {"element_id": "auto:clearButton", "tool": "invoke"}})),
         (200, _json_reply({"tool": "invoke", "args": _nested(*SUM_17_25)})),
         (200, _json_reply({"tool": "done", "args": {"message": "42"}})),
     ]
-    agent, result, t = run_replies(replies)
+    agent, result, t = run_replies(replies, model="qwen2.5vl:7b")
     assert result.ok, result.message
     assert backend.pressed == ["clearButton", *PRESSED_17_25]
     assert backend.calc.display == "42"
-    system = t.requests[1].body["messages"][0]["content"]
-    assert '{"actions": [' in system and 'Never put a tool call inside "args"' in system
+    assert "tools" not in t.requests[0].body
+    system = t.requests[0].body["messages"][0]["content"]
+    assert '{"actions": [' in system and "never another tool call" in system
     invokes = next(s for s in result.steps if s["kind"] == "plan" and s["turn"] == 1)["plan_steps"]
     assert [p["args"] for p in invokes] == [{"element_id": e} for e in SUM_17_25]
 

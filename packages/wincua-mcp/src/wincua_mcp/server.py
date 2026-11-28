@@ -71,8 +71,44 @@ def _structured_error(err: StructuredError) -> dict[str, Any]:
     return out
 
 
-def _element_dict(ref: ElementRef) -> dict[str, Any]:
-    d: dict[str, Any] = {"id": ref.element_id, "role": ref.role}
+_NAME_FIRST_ROLES = frozenset({"edit", "combobox", "button", "hyperlink", "checkbox", "radiobutton", "menuitem"})
+
+
+def stable_ids(elements: list[ElementRef]) -> dict[str, str]:
+    """Snapshot id -> id that survives re-observation: ``auto:<AutomationId>``, else ``name:<Name>``.
+
+    Snapshot ids (``fullName_12``) are renumbered on every walk. A Name shared by
+    a label and its input goes to the input; later duplicates keep the snapshot id.
+    """
+    out: dict[str, str] = {}
+    used: set[str] = set()
+    for ref in elements:
+        eid = ref.element_id
+        auto = ref.auto_id or (eid[5:] if eid.startswith("auto:") else "")
+        if eid.startswith(("auto:", "name:")):
+            out[eid] = eid
+        elif auto and f"auto:{auto}" not in used:
+            out[eid] = f"auto:{auto}"
+        else:
+            continue
+        used.add(out[eid])
+    for interactive in (True, False):
+        for ref in elements:
+            if ref.element_id in out or not ref.name:
+                continue
+            if ((ref.role or "").lower() in _NAME_FIRST_ROLES) != interactive:
+                continue
+            key = f"name:{ref.name}"
+            if key not in used:
+                out[ref.element_id] = key
+                used.add(key)
+    for ref in elements:
+        out.setdefault(ref.element_id, ref.element_id)
+    return out
+
+
+def _element_dict(ref: ElementRef, element_id: str | None = None) -> dict[str, Any]:
+    d: dict[str, Any] = {"id": element_id or ref.element_id, "role": ref.role}
     if ref.name:
         d["name"] = ref.name
     if ref.bounds:
@@ -114,6 +150,9 @@ class WincuaMcpRuntime:
     hitl: HitlHook = field(default_factory=default_hitl_hook)
     current_target: str | None = None
     focused_target: str | None = None
+    # Window handle behind current_target: browsers retitle the window (page
+    # title changes on submit), so the old title alone stops matching.
+    current_handle: int | None = None
     elements: dict[str, ElementRef] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -160,6 +199,8 @@ class WincuaMcpRuntime:
             )
         windows = await self.windows()
         window = resolve_window(windows, target)
+        if window is None and self.current_handle and target == self.current_target:
+            window = next((w for w in windows if w.get("handle") == self.current_handle), None)
         if window is None:
             allowed_titles = [w.get("title") for w in windows if self.allow.allows_window(w)]
             return None, _error(
@@ -176,6 +217,8 @@ class WincuaMcpRuntime:
                 process=window.get("process"),
                 allow=self.allow.entries,
             )
+        if window.get("handle"):
+            self.current_handle = int(window["handle"])
         return window, None
 
 
@@ -287,11 +330,13 @@ def build_server(
         out = _result_dict(result)
         if result.ok:
             info = result.info or {}
-            target = info.get("title") or title
+            # Prefer the caller's title: it is a stable substring, the full window title is not.
+            target = title or info.get("title")
             if not target and app and is_calculator_target(app):
                 target = "Calculator"
             runtime.current_target = target or exe_key(exe)
             runtime.focused_target = runtime.current_target
+            runtime.current_handle = None
             runtime.elements.clear()
             out["target"] = runtime.current_target
         return out
@@ -325,14 +370,16 @@ def build_server(
         include = ["uia", "app"] + (["screenshot"] if include_screenshot else [])
         obs: Observation = await backend.observe(resolved, include)
         runtime.current_target = resolved
+        ids = stable_ids(obs.uia)
         runtime.elements = {ref.element_id: ref for ref in obs.uia}
+        runtime.elements.update({ids[ref.element_id]: ref for ref in obs.uia})
         cap = max_elements or settings.max_elements
         kept, total = trim_elements(obs.uia, max_elements=cap, roles=roles, name_contains=name_contains)
         payload: dict[str, Any] = {
             "ok": not any(e.code == "window_not_found" for e in obs.errors),
             "target": resolved,
             "process": window.get("process"),
-            "elements": [_element_dict(r) for r in kept],
+            "elements": [_element_dict(r, ids[r.element_id]) for r in kept],
             "element_count": total,
             "truncated": total > len(kept),
         }
@@ -481,5 +528,6 @@ __all__ = [
     "build_server",
     "get_runtime",
     "run",
+    "stable_ids",
     "trim_elements",
 ]
