@@ -318,3 +318,25 @@ def test_windows_backend_off_windows_reports_error():
         assert out["error"]["code"] == "backend_unavailable"
 
     run_client(server, go)
+
+
+def test_window_state_error_has_hint_and_forces_refocus():
+    backend = MockBackend()
+    server = build_server(settings(), backend=backend, hitl=StubHitlHook())
+    runtime = get_runtime(server)
+
+    async def go(client):
+        assert (await call(client, "launch", app="calc"))["ok"]
+        backend.window_issue, backend.window_issue_sticky = "window_minimized", True
+        out = await call(client, "act", action="invoke", element_id="auto:num7Button")
+        assert out["ok"] is False
+        assert out["error"]["code"] == "window_minimized"
+        assert out["error"]["hint"].startswith("Call focus")
+        assert out["error"]["details"]["title"] == "Calculator"
+        assert runtime.focused_target is None
+        backend.window_issue = None
+        focuses = sum(1 for a in backend.actions if isinstance(a, Semantic) and a.name == "focus")
+        assert (await call(client, "act", action="invoke", element_id="auto:num7Button"))["ok"]
+        assert sum(1 for a in backend.actions if isinstance(a, Semantic) and a.name == "focus") == focuses + 1
+
+    run_client(server, go)

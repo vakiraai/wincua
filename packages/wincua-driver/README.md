@@ -34,3 +34,8 @@ silently fall back.
   open with `--new-window` + throwaway profile.
 - Timeouts: constructor `launch_timeout_s=` or env `WINCUA_LAUNCH_TIMEOUT_S` (default 45s).
 - Failures include **visible window titles** so mis-matched titles are debuggable.
+- Window-state preflight (`wincua_driver.window_state`): actions fail with
+  `window_minimized`, `window_hidden`, `window_cloaked`, `window_not_foreground`,
+  `target_offscreen` or `target_obscured` (plus `hint`) instead of reaching another
+  window. The driver restores/focuses once first; `WINCUA_AUTO_FOCUS=0` turns that off.
+  See "Window-state checks" in [docs/config.md](../../docs/config.md).

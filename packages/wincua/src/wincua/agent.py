@@ -464,15 +464,20 @@ class Agent:
                     )
                 entry["result"] = {
                     k: result_record[k]
-                    for k in ("ok", "message", "display", "info")
+                    for k in ("ok", "code", "message", "hint", "display", "info")
                     if result_record.get(k) is not None
                 }
                 if by_human:
                     # Failures go back to the human on the next prompt; no guard / escalation.
                     if result_record.get("ok") is False:
                         log = result_record.get("detail_log")
-                        human_note = f"Last action {tool_name} failed: {result_record.get('message')}" + (
-                            f" (full details: {log})" if log else ""
+                        code = result_record.get("code")
+                        human_note = (
+                            f"Last action {tool_name} failed"
+                            + (f" [{code}]" if code else "")
+                            + f": {result_record.get('message')}"
+                            + (f" Hint: {result_record['hint']}" if result_record.get("hint") else "")
+                            + (f" (full details: {log})" if log else "")
                         )
                         skipped = [q for q in queue if id(q) in human_steps]
                         if skipped:
@@ -495,6 +500,10 @@ class Agent:
                         finished = True
                         ok = False
                         message = result_record.get("message") or "tool failed"
+                        if result_record.get("code"):
+                            message = f"[{result_record['code']}] {message}"
+                        if result_record.get("hint"):
+                            message = f"{message} Hint: {result_record['hint']}"
                         break
                 error_streak = 0
                 # Allow scripts to retarget observe
@@ -789,7 +798,8 @@ def _write_detail(session_id: str | None, turn: int, tool: str, text: str) -> st
 
 
 def _tool_result(name: str, result: Any) -> dict[str, Any]:
-    full = None if result.ok else (result.error.message if result.error else None)
+    error = None if result.ok else result.error
+    full = error.message if error else None
     out: dict[str, Any] = {
         "kind": "tool",
         "name": name,
@@ -798,6 +808,10 @@ def _tool_result(name: str, result: Any) -> dict[str, Any]:
         # Short text for models and logs; the full driver message (UIA dumps…) stays in "detail".
         "message": short_error(full),
     }
+    if error is not None:
+        out["code"] = error.code
+        if getattr(error, "hint", ""):
+            out["hint"] = error.hint
     if full and full != out["message"]:
         out["detail"] = full
     info = getattr(result, "info", None)

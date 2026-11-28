@@ -140,7 +140,11 @@ def observation_to_dict(obs: Any) -> dict[str, Any] | None:
     return {
         "app": _json_safe(getattr(obs, "app", None)),
         "errors": [
-            {"code": getattr(e, "code", ""), "message": getattr(e, "message", str(e))}
+            {
+                "code": getattr(e, "code", ""),
+                "message": getattr(e, "message", str(e)),
+                **({"hint": e.hint} if getattr(e, "hint", "") else {}),
+            }
             for e in (getattr(obs, "errors", None) or [])
         ],
         "uia": elements,

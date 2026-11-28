@@ -20,6 +20,7 @@ from wincua_driver.types import (
     StructuredError,
     Type,
 )
+from wincua_driver.window_state import is_window_state_error
 
 from wincua_mcp import __version__
 from wincua_mcp.hitl import HitlHook, confirm_action, default_hitl_hook
@@ -34,6 +35,9 @@ Typical loop: list_windows → launch (if needed) → observe → act → observ
 Prefer element ids returned by observe (or `auto:<AutomationId>` / `name:<Name>`) over x/y clicks.
 Only processes on the configured allow-list can be launched, observed or acted on.
 Risky actions (submits, destructive keys, coordinate clicks) may block for human approval.
+Before acting, wincua checks the target window and fails instead of typing or clicking into another window:
+window_minimized, window_hidden, window_cloaked, window_not_foreground, target_offscreen, target_obscured.
+Each error carries a `hint`; usually retry act (it refocuses the target), and ask_human if it persists.
 Use ask_human when the task is ambiguous or needs information only the user has.
 """
 
@@ -66,6 +70,8 @@ def _error(code: str, message: str, **details: Any) -> dict[str, Any]:
 
 def _structured_error(err: StructuredError) -> dict[str, Any]:
     out: dict[str, Any] = {"code": err.code, "message": err.message}
+    if err.hint:
+        out["hint"] = err.hint
     if err.details:
         out["details"] = {k: v for k, v in err.details.items() if k != "tree"}
     return out
@@ -487,6 +493,9 @@ def build_server(
         runtime.current_target = resolved
 
         result = await backend.act(built, dry_run=dry_run)
+        if is_window_state_error(result.error):
+            # The window moved, minimized or lost focus since the last focus; refocus next call.
+            runtime.focused_target = None
         return {**out, **_result_dict(result)}
 
     @mcp.tool(

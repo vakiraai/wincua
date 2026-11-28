@@ -166,7 +166,10 @@
     for (const [k, v] of Object.entries(obs.app || {})) {
       app.append(el("span", { class: "k" }, k), el("span", {}, typeof v === "object" ? JSON.stringify(v) : String(v)));
     }
-    for (const e of obs.errors || []) errs.append(el("div", { class: "errline" }, `⚠ ${e.code}: ${e.message}`));
+    for (const e of obs.errors || []) {
+      errs.append(el("div", { class: "errline" }, `⚠ ${e.code}: ${e.message}`));
+      if (e.hint) errs.append(el("div", { class: "errhint" }, e.hint));
+    }
     const rows = obs.uia || [];
     $("obs-count").textContent = `· ${rows.length}${obs.uia_total > rows.length ? " of " + obs.uia_total : ""} elements`;
     const q = $("obs-filter").value.toLowerCase();

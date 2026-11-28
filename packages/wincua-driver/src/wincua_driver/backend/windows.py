@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import os
 import platform
 import re
@@ -47,6 +48,7 @@ from wincua_driver.types import (
     StructuredError,
     Type,
 )
+from wincua_driver.window_state import Need, Win32WindowProbe, WindowProbe, check_window
 
 # Win11 Store Calculator AUMID (stable across consumer installs)
 _CALC_AUMID = "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
@@ -834,6 +836,12 @@ class WindowsBackend:
 
     name = "windows"
     invoke_retry_delay_s = 0.3
+    focus_settle_s = 0.25
+    # Before failing with window_minimized / target_obscured / …, restore and
+    # focus the target once and check again. WINCUA_AUTO_FOCUS=0 turns it off.
+    auto_focus = True
+    _probe: WindowProbe | None = None
+    _toplevel_hwnd: int | None = None
 
     def __init__(
         self,
@@ -841,6 +849,7 @@ class WindowsBackend:
         *,
         launch_timeout_s: float | None = None,
         control_timeout_s: float | None = None,
+        auto_focus: bool | None = None,
     ) -> None:
         if not is_windows():
             err = windows_unavailable_error()
@@ -859,6 +868,10 @@ class WindowsBackend:
             if control_timeout_s is not None
             else (env_control or _DEFAULT_CONTROL_TIMEOUT_S)
         )
+        if auto_focus is None:
+            env_focus = os.environ.get("WINCUA_AUTO_FOCUS", "").strip().lower()
+            auto_focus = env_focus not in ("0", "false", "no", "off")
+        self.auto_focus = auto_focus
 
         self.allow: list[str] = [a.lower() for a in (allow or [])]
         self._elements: dict[str, ElementRef] = {}
@@ -1033,6 +1046,7 @@ class WindowsBackend:
     def _bind_window(self, window: Any, title: str | None = None) -> None:
         """Remember the UIA root and warm the wrapper cache via a deep walk."""
         self._window = window
+        self._toplevel_hwnd = None
         if title:
             self._target_title = title
         self._content_root = None
@@ -1119,6 +1133,92 @@ class WindowsBackend:
                 win32gui.SetForegroundWindow(hwnd)
         except Exception:
             pass
+
+    # --- window-state preflight -------------------------------------------
+
+    def _window_probe(self) -> WindowProbe | None:
+        probe = self._probe
+        if probe is None and is_windows():
+            try:
+                probe = self._probe = Win32WindowProbe()
+            except Exception:
+                return None
+        return probe
+
+    def _target_hwnd(self, probe: WindowProbe) -> int:
+        """Top-level HWND of the bound target (the ApplicationFrameWindow for Calculator)."""
+        cached = self._toplevel_hwnd
+        if cached and probe.is_window(cached):
+            return cached
+        try:
+            hwnd = int(getattr(self._window, "handle", None) or 0)
+        except Exception:
+            hwnd = 0
+        root = probe.root(hwnd) if hwnd else 0
+        # A minimized UWP app's CoreWindow is detached from its frame.
+        detached = bool(root) and probe.class_name(root).endswith("CoreWindow")
+        if detached or (not root and is_calculator_target(self._target_title or "")):
+            frame = self._calculator_frame(self._window)
+            try:
+                root = int(getattr(frame, "handle", None) or 0) if frame is not None else root
+            except Exception:
+                pass
+        self._toplevel_hwnd = root or None
+        return root
+
+    def _window_state_error(self, need: Need, point: Any = None) -> StructuredError | None:
+        """Check the bound window without trying to fix it (None when unbound or off Windows)."""
+        probe = self._window_probe()
+        if probe is None or self._window is None:
+            return None
+        hwnd = self._target_hwnd(probe)
+        if not hwnd:
+            return None
+        pt = point() if callable(point) else point
+        return check_window(probe, hwnd, need=need, point=pt)
+
+    def _preflight(self, need: Need, point: Any = None, *, retry: bool | None = None) -> StructuredError | None:
+        """Window-state check before acting; restore/focus once and re-check if allowed.
+
+        ``point`` is an (x, y) or a callable returning one, re-read after the
+        restore because a restored window has new element bounds.
+        """
+        err = self._window_state_error(need, point)
+        if err is None:
+            return None
+        if not (self.auto_focus if retry is None else retry):
+            return dataclasses.replace(err, details={**err.details, "auto_focus": False})
+        probe = self._window_probe()
+        hwnd = self._target_hwnd(probe) if probe is not None else 0
+        try:
+            if probe is not None and hwnd:
+                probe.restore_and_focus(hwnd)
+        except Exception:
+            pass
+        time.sleep(self.focus_settle_s)
+        again = self._window_state_error(need, point)
+        if again is None:
+            self.__dict__.setdefault("_window_recovered", []).append(err.code)
+            return None
+        return dataclasses.replace(
+            again,
+            message=f"{again.message} Tried restore/focus once.",
+            details={**again.details, "auto_focus": True, "first_error": err.code},
+        )
+
+    @staticmethod
+    def _center(wrapper: Any) -> tuple[int, int] | None:
+        try:
+            r = wrapper.rectangle()
+        except Exception:
+            return None
+        if r.right <= r.left or r.bottom <= r.top:
+            return None
+        return ((r.left + r.right) // 2, (r.top + r.bottom) // 2)
+
+    @staticmethod
+    def _failed(err: StructuredError) -> ActionResult:
+        return ActionResult(ok=False, mode_used="windows", error=err)
 
     def _window_key(self, window: Any) -> str:
         try:
@@ -1556,6 +1656,9 @@ class WindowsBackend:
         else:
             self._bind_window(window, title=target)
 
+        if state := self._window_state_error("observe"):
+            errors.append(state)
+
         if "uia" in include:
             seen: set[str] = set()
             for key, ref in self._elements.items():
@@ -1702,7 +1805,14 @@ class WindowsBackend:
     def _act_sync(self, action: Action, dry_run: bool) -> ActionResult:
         if dry_run:
             return ActionResult(ok=True, mode_used="dry-run")
+        self._window_recovered: list[str] = []
+        result = self._dispatch(action)
+        if self._window_recovered:
+            # Never a silent focus change: report what the preflight fixed.
+            result.info = {**(result.info or {}), "window_recovered": list(self._window_recovered)}
+        return result
 
+    def _dispatch(self, action: Action) -> ActionResult:
         try:
             if isinstance(action, Semantic):
                 return self._semantic(action)
@@ -1775,6 +1885,8 @@ class WindowsBackend:
         )
 
     def _invoke(self, element_id: str, *, prefer: Sequence[str] = INVOKE_TYPES) -> ActionResult:
+        if err := self._preflight("pattern"):
+            return self._failed(err)
         try:
             wrapper = self._resolve_wrapper(element_id, prefer=prefer)
         except Exception as exc:
@@ -1785,6 +1897,8 @@ class WindowsBackend:
             wrapper = self._resolve_wrapper(element_id, prefer=prefer)
         # Calculator clear fallback: Escape when neither clear button exists
         if wrapper is None and element_id in ("auto:clearButton", "auto:clearEntryButton"):
+            if err := self._preflight("keyboard"):
+                return self._failed(err)
             try:
                 from pywinauto.keyboard import send_keys
 
@@ -1837,6 +1951,15 @@ class WindowsBackend:
                 except Exception as exc:
                     error = exc
                     info["retry_error"] = describe_com_error(exc)
+        if err := self._preflight("pointer", lambda: self._center(wrapper)):
+            return self._failed(
+                dataclasses.replace(
+                    err,
+                    message=f"Invoke {element_id!r} failed ({describe_com_error(error)}); "
+                    f"not falling back to a click: {err.message}",
+                    details={**err.details, **info},
+                )
+            )
         try:
             self._click_center(wrapper)
         except Exception as exc:
@@ -1859,9 +1982,13 @@ class WindowsBackend:
             wrapper = self._resolve_wrapper(action.element_id, prefer=INVOKE_TYPES + EDIT_TYPES)
             if wrapper is None:
                 return self._not_found(action.element_id)
+            if err := self._preflight("pointer", lambda: self._center(wrapper)):
+                return self._failed(dataclasses.replace(err, details={**err.details, "element_id": action.element_id}))
             wrapper.click_input()
             return ActionResult(ok=True, mode_used="windows")
         if action.x is not None and action.y is not None:
+            if err := self._preflight("pointer", (action.x, action.y)):
+                return self._failed(err)
             from pywinauto import mouse
 
             mouse.click(coords=(action.x, action.y))
@@ -1917,6 +2044,8 @@ class WindowsBackend:
             return "send_keys"
 
     def _type(self, action: Type, *, prefer: Sequence[str] = EDIT_TYPES) -> ActionResult:
+        if err := self._preflight("keyboard"):
+            return self._failed(err)
         method = "send_keys"
         verified: str | None = None
         if action.element_id:
@@ -1976,6 +2105,8 @@ class WindowsBackend:
         )
 
     def _key(self, keys: str) -> ActionResult:
+        if err := self._preflight("keyboard"):
+            return self._failed(err)
         from pywinauto.keyboard import send_keys
 
         mapped = keys
@@ -2075,13 +2206,13 @@ class WindowsBackend:
                             },
                         ),
                     )
-                return ActionResult(ok=True, mode_used="windows")
+                return self._focus_result()
             if self._window is not None and self._window_key(window) == self._window_key(self._window):
                 # Already bound: re-walking would renumber the snapshot ids just observed.
                 self._target_title = title or self._target_title
             else:
                 self._bind_window(window, title=title)
-            return ActionResult(ok=True, mode_used="windows")
+            return self._focus_result()
 
         if name in ("open_url", "browser.open"):
             return self._open_url(
@@ -2130,6 +2261,12 @@ class WindowsBackend:
                 message=f"Unknown semantic action: {name!r}",
             ),
         )
+
+    def _focus_result(self) -> ActionResult:
+        """focus is the recovery step, so it fails when the window did not come to the front."""
+        if err := self._preflight("keyboard", retry=True):
+            return self._failed(err)
+        return ActionResult(ok=True, mode_used="windows")
 
     def _shell_start(self, target: str) -> None:
         """Start via ShellExecute / startfile (does not wait on a stub process)."""

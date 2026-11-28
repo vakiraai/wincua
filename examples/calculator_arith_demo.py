@@ -32,6 +32,8 @@ for _p in (
 ):
     sys.path.insert(0, str(_p))
 
+from wincua_driver.window_state import WINDOW_STATE_CODES  # noqa: E402
+
 GOLDEN = 42
 EXPRESSION = "17 + 25"
 
@@ -47,7 +49,9 @@ _CALC_BUTTONS = (
 )
 
 
-def build_calculator_steps():
+def build_calculator_steps(*, pause_s: float = 0.0, click: bool = False):
+    """Scripted steps. ``pause_s`` waits after focus (cover or minimize Calculator
+    then); ``click`` presses buttons with real mouse clicks instead of UIA Invoke."""
     from wincua_providers.base import PlanStep
 
     steps: list[PlanStep] = [
@@ -69,14 +73,14 @@ def build_calculator_steps():
         ),
         PlanStep(kind="tool", name="wait", args={"seconds": 0.3}),
     ]
+    if pause_s > 0:
+        steps.append(PlanStep(kind="tool", name="wait", args={"seconds": pause_s}))
     for auto_id in _CALC_BUTTONS:
-        steps.append(
-            PlanStep(
-                kind="tool",
-                name="invoke",
-                args={"auto_id": auto_id, "target": "Calculator"},
-            )
-        )
+        if click:
+            step = PlanStep(kind="tool", name="click", args={"element_id": f"auto:{auto_id}"})
+        else:
+            step = PlanStep(kind="tool", name="invoke", args={"auto_id": auto_id, "target": "Calculator"})
+        steps.append(step)
         steps.append(PlanStep(kind="tool", name="wait", args={"seconds": 0.15}))
     steps.append(
         PlanStep(
@@ -102,6 +106,30 @@ async def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Override launch wait seconds (also: env WINCUA_LAUNCH_TIMEOUT_S)",
     )
+    parser.add_argument(
+        "--pause",
+        type=float,
+        default=0.0,
+        metavar="S",
+        help="Wait S seconds after Calculator is focused, e.g. to cover it with Notepad or minimize it",
+    )
+    parser.add_argument(
+        "--click",
+        action="store_true",
+        help="Press buttons with mouse clicks instead of UIA Invoke (exercises the target_obscured check)",
+    )
+    parser.add_argument(
+        "--no-auto-focus",
+        action="store_true",
+        help="Fail with window_minimized / target_obscured / … instead of restoring and focusing once "
+        "(sets WINCUA_AUTO_FOCUS=0)",
+    )
+    parser.add_argument(
+        "--simulate",
+        default=None,
+        choices=sorted(WINDOW_STATE_CODES),
+        help="With --mock: make the fake Calculator report this window state (focus cannot fix it)",
+    )
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from _llm_common import add_provider_args, load_demo_config, wants_model  # noqa: E402
 
@@ -122,9 +150,16 @@ async def main(argv: list[str] | None = None) -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from _windows_preflight import require_windows_uia_stack  # noqa: E402
 
+    if args.no_auto_focus:
+        import os
+
+        os.environ["WINCUA_AUTO_FOCUS"] = "0"
+
     if args.mock:
-        set_backend("mock")
+        mock = set_backend("mock")
         backend = "mock"
+        if args.simulate:
+            mock.window_issue, mock.window_issue_sticky = args.simulate, True
     elif not is_windows():
         print(
             "HOST-WINDOWS-ONLY: calculator_arith_demo needs Win11 (or pass --mock). "
@@ -148,7 +183,7 @@ async def main(argv: list[str] | None = None) -> int:
         print("calculator_arith_demo (model-planned)")
         return await run_with_model(args, backend, cfg)
 
-    steps = build_calculator_steps()
+    steps = build_calculator_steps(pause_s=args.pause, click=args.click)
     if args.timeout is not None:
         steps[0].args["timeout_s"] = args.timeout
 
@@ -179,6 +214,9 @@ async def main(argv: list[str] | None = None) -> int:
     print(f"  backend: {backend}")
     print(f"  allow: {list(agent.allow)}")
     print(f"  provider: {agent.provider.name}")
+    print(f"  buttons: {'mouse click' if args.click else 'UIA Invoke'}; auto-focus: {not args.no_auto_focus}")
+    if args.pause:
+        print(f"  pausing {args.pause:g}s after Calculator is focused: cover it with another window or minimize it now")
 
     result = await agent.run()
     print(f"result.ok={result.ok} message={result.message!r}")

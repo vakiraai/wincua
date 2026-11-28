@@ -21,8 +21,10 @@ from wincua_driver.types import (
     StructuredError,
     Type,
 )
+from wincua_driver.window_state import WINDOW_STATE_CODES, is_window_state_error
 
 __all__ = [
+    "WINDOW_STATE_CODES",
     "ActionResult",
     "Click",
     "ElementRef",
@@ -36,6 +38,7 @@ __all__ = [
     "act",
     "ensure_pywinauto",
     "get_backend",
+    "is_window_state_error",
     "is_windows",
     "observe",
     "probe_pywinauto",
