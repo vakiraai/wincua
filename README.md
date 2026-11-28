@@ -10,6 +10,158 @@ or a human in a small local HITL UI.
 > pywinauto/UIA backend on Win11. CI and non-Windows hosts keep `null` / `mock`
 > backends and get clear errors if `windows` is selected.
 
+## Quickstart (fresh Windows 11, about 15 minutes)
+
+The Ollama model download (6 GB) is the slowest step: start it first, and do the
+rest while it runs. Every other step takes a minute or two.
+
+### 1. Prerequisites
+
+| Need | Notes |
+| --- | --- |
+| Windows 11, logged on at the desktop | Not a service, Session 0 or SSH-only session: wincua drives the visible desktop |
+| Python **3.12 or 3.13** | `winget install Python.Python.3.12` (or python.org). 3.11+ is supported, 3.15 works too (see [Supported Python](#supported-python)) |
+| Git | `winget install Git.Git` |
+| Microsoft Edge, Calculator | Preinstalled. Open Calculator once from Start if this account never has |
+| *Optional:* [Ollama](https://ollama.com) | `winget install Ollama.Ollama`, then `ollama pull qwen2.5vl:7b`. Only for the model-planned demos |
+| *Optional:* Cursor | For the MCP server (step 6) |
+
+### 2. Clone, venv, install
+
+```powershell
+git clone https://github.com/vakiraai/wincua C:\src\wincua
+cd C:\src\wincua
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+python -m pip install -e "packages/wincua-driver[windows]" -e packages/wincua-providers -e packages/wincua-hitl -e packages/wincua -e packages/wincua-mcp
+```
+
+Install the packages one by one as above. The repo root is a uv workspace
+manifest, not a package, so `pip install -e .` fails (see
+[Troubleshooting](#quickstart-troubleshooting)).
+
+### 3. Config and install check
+
+```powershell
+copy wincua.example.toml wincua.toml
+python scripts/quickstart_check.py
+```
+
+`wincua.toml` (git-ignored) picks Ollama `qwen2.5vl:7b` with `null` (ask the
+human) as fallback, and allow-lists Calculator and `msedge.exe`. The check
+prints one line per item and ends with an `mcp.json` entry for this venv:
+
+```text
+wincua quickstart check
+  [ok]   python: 3.12.x (C:\src\wincua\.venv\Scripts\python.exe)
+  [ok]   import wincua: C:\src\wincua\packages\wincua\src\wincua
+  ...
+  [ok]   import mcp: C:\src\wincua\.venv\Lib\site-packages\mcp
+  [ok]   pywinauto: pywinauto 0.6.9 @ C:\src\wincua\.venv\Scripts\python.exe (3.12.x)
+  [ok]   edge: C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
+  [ok]   config: C:\src\wincua\wincua.toml
+  [ok]   provider ollama: ollama ok at http://127.0.0.1:11434, model 'qwen2.5vl:7b' present
+all required checks passed
+```
+
+`[warn]` lines (Ollama not running, model not pulled yet) don't block the next step.
+`[FAIL]` lines print the fix.
+
+### 4. Demos without a model (scripted)
+
+```powershell
+python examples/calculator_arith_demo.py --mock    # fake Calculator, no desktop
+python examples/browser_form_demo.py --mock        # fake form, no desktop
+python examples/calculator_arith_demo.py           # real Calculator: 17 + 25
+python examples/browser_form_demo.py               # real Edge: fills and submits examples/fixtures/form.html
+```
+
+The real runs open and fill the windows through UI Automation; don't type or
+click while they run. Expected last lines:
+
+```text
+result.ok=True message='17 + 25 == 42'                                  # calculator_arith_demo
+golden 'OK: Ada Lovelace <ada@example.com>': PASS (page text)           # browser_form_demo
+```
+
+### 5. Demos planned by Ollama
+
+```powershell
+python examples/browser_form_demo.py --check       # probe the model chain, run nothing
+python examples/calculator_llm_demo.py --provider ollama
+python examples/browser_form_demo.py --provider ollama
+```
+
+`--check` should show `[ok] ollama: ollama ok at http://127.0.0.1:11434, model 'qwen2.5vl:7b' present`.
+The first model load takes up to a minute. Expected output:
+
+```text
+  [turn 0] ollama: launch(app='calculator', title='Calculator')
+  [turn 1] ollama: invoke(element_id='auto:clearButton'), invoke(element_id='auto:num1Button'), ...
+  [turn 2] ollama: done(message='42')
+result.ok=True message='42'
+verify: display='Display is 42' expected 42 -> PASS                     # calculator_llm_demo
+
+  [turn 0] ollama: open_url(url='file:///C:/src/wincua/examples/fixtures/form.html', ...)
+  [turn 1] ollama: type(element_id='auto:fullName', ...), type(element_id='auto:email', ...), invoke(element_id='auto:submitButton')
+  [turn 2] ollama: done(message='OK: Ada Lovelace <ada@example.com>')
+golden 'OK: Ada Lovelace <ada@example.com>': PASS (page text)           # browser_form_demo
+```
+
+The model's turns can differ from run to run; the `PASS` line is what counts.
+If Ollama is unavailable, the run prints `[wincua] ollama unavailable: <reason>; falling back to null`
+and asks you for each step in the terminal (Ctrl+C to stop).
+
+### 6. MCP server in Cursor
+
+Add this to `%USERPROFILE%\.cursor\mcp.json` (merge into `mcpServers` if the file
+exists). Use full paths: Cursor does not activate your venv.
+
+```json
+{
+  "mcpServers": {
+    "wincua": {
+      "command": "C:\\src\\wincua\\.venv\\Scripts\\wincua-mcp.exe",
+      "args": ["--config", "C:\\src\\wincua\\wincua.toml"]
+    }
+  }
+}
+```
+
+Sanity check in a terminal, then restart Cursor. Cursor Settings → MCP should
+list `wincua` with 5 tools (`list_windows`, `launch`, `observe`, `act`, `ask_human`).
+
+```powershell
+C:\src\wincua\.venv\Scripts\wincua-mcp.exe --config C:\src\wincua\wincua.toml --print-config
+# config: C:\src\wincua\wincua.toml
+# transport: stdio
+# http: 127.0.0.1:8766
+# backend: windows
+# allow: ['CalculatorApp.exe', 'ApplicationFrameHost.exe', 'calc.exe', 'msedge.exe']
+# require_confirmation: True
+```
+
+Ask Cursor's agent: *"Use wincua to open Calculator, compute 17 + 25 with the buttons,
+and read the display."* It should end with `Display is 42`. Risky actions (submit,
+Alt+F4, …) wait for Approve/Reject in the HITL page at `http://127.0.0.1:8765`. The
+browser form prompt and more are in [packages/wincua-mcp/README.md](packages/wincua-mcp/README.md#try-it).
+
+### Quickstart troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| `Activate.ps1 cannot be loaded because running scripts is disabled` | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, then activate again |
+| `error: Multiple top-level packages discovered in a flat-layout: ['apps', 'evals', 'packages']` | You ran `pip install -e .` at the repo root, which is not a package. Use the per-package install line in step 2 |
+| Cursor shows the server failing with `No module named 'mcp'` (`--print-config` still works) | `mcp` isn't in the venv Cursor runs. With that venv active: `python -m pip install -e packages/wincua-mcp`, and check `command` in `mcp.json` points at the same `.venv`. If pip tries to compile `pydantic-core`, use Python 3.12 or 3.13 |
+| `[unavailable] ollama: ollama: unreachable at http://127.0.0.1:11434/api/tags` | Ollama isn't running: start the Ollama app (or `ollama serve`), then `ollama list` |
+| `ollama reachable at ... but model 'qwen2.5vl:7b' is not pulled` | `ollama pull qwen2.5vl:7b` (or set `model` in `[providers.ollama]` to one you have) |
+| Behind a proxy: pip or `ollama pull` can't download | pip: `$env:HTTPS_PROXY = "http://proxy:8080"` before installing (or `--proxy`). Ollama downloads in its own server process: set `HTTPS_PROXY` as a user environment variable, quit Ollama from the tray and start it again |
+| Behind a proxy: wincua can't reach Ollama | Requests to `127.0.0.1` / `localhost` already skip the proxy. For Ollama on another machine, add its host to `NO_PROXY` |
+| `HOST-WINDOWS-ONLY: ...` | Not running on Windows; use `--mock` |
+| `import pywinauto` fails | See [Launch / import troubleshooting](#launch--import-troubleshooting) |
+| `golden ...: FAIL` | Attach the `recordings/browser-form-*-uia.txt` the demo names, plus its output |
+
 ## Status
 
 Phase 0/1 — **real Windows driver path** + scripted Calculator / browser demos,
@@ -68,9 +220,7 @@ py -3.15 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
 python -m pip install -U pip
-python -m pip install -e "packages/wincua-driver[windows]"
-python -m pip install -e packages/wincua-providers packages/wincua-hitl
-python -m pip install -e "packages/wincua[windows]"
+python -m pip install -e "packages/wincua-driver[windows]" -e packages/wincua-providers -e packages/wincua-hitl -e packages/wincua -e packages/wincua-mcp
 
 # If upgrading an older env that already had pywinauto:
 python -m pip install -U "comtypes>=1.5.0" "pywin32>=312" "pywinauto>=0.6.9"
