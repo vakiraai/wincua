@@ -176,3 +176,17 @@ class OllamaProvider(HTTPChatProvider):
             )
         return True, f"ollama ok at {self.base_url}, model {self.model!r} present"
 
+    async def warm_up(self) -> tuple[bool, str]:
+        """Load the model into memory (empty prompt, no tokens) so turn 1 isn't a cold start."""
+        payload: dict[str, Any] = {"model": self.model, "prompt": "", "stream": False}
+        if self.keep_alive:
+            payload["keep_alive"] = self.keep_alive
+        try:
+            resp = await self._request("POST", f"{self.base_url}/api/generate", payload)
+            if resp.status == 404:
+                raise_for_status(resp, label=self.name, hint=f"run: ollama pull {self.model}")
+            raise_for_status(resp, label=self.name)
+        except ProviderUnavailable as exc:
+            return False, str(exc)
+        return True, f"model {self.model!r} loaded"
+

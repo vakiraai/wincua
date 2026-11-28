@@ -10,6 +10,7 @@ import asyncio
 import json
 import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping
@@ -47,6 +48,17 @@ class ProviderUnavailable(Exception):
         self.body = body
 
 
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+# Local model servers must not go through HTTP(S)_PROXY or the Windows system
+# proxy: urllib's registry bypass ("<local>") does not cover 127.0.0.1.
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def is_loopback_url(url: str) -> bool:
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    return host in _LOOPBACK_HOSTS or host.startswith("127.")
+
+
 def _urllib_request(
     method: str,
     url: str,
@@ -55,8 +67,9 @@ def _urllib_request(
     timeout_s: float,
 ) -> HTTPResponse:
     req = urllib.request.Request(url, data=body, method=method, headers=dict(headers))
+    opener = _DIRECT_OPENER.open if is_loopback_url(url) else urllib.request.urlopen
     try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 - user-configured URL
+        with opener(req, timeout=timeout_s) as resp:  # noqa: S310 - user-configured URL
             return HTTPResponse(status=resp.status, body=resp.read())
     except urllib.error.HTTPError as exc:
         return HTTPResponse(status=exc.code, body=exc.read() or b"")
@@ -110,7 +123,10 @@ async def request_json(
                 attempt += 1
                 await asyncio.sleep(retry_backoff_s * attempt)
                 continue
-            raise ProviderUnavailable(f"{label}: timed out after {timeout_s:g}s ({url})") from exc
+            raise ProviderUnavailable(
+                f"{label}: timed out after {timeout_s:g}s ({url}); a local model may still be loading, "
+                "raise timeout_s for this provider in wincua.toml"
+            ) from exc
         except (ConnectionError, OSError) as exc:
             raise ProviderUnavailable(f"{label}: unreachable at {url} ({exc})") from exc
         if resp.status in RETRY_STATUSES and attempt < retries:
@@ -120,11 +136,23 @@ async def request_json(
         return resp
 
 
+def error_text(resp: HTTPResponse) -> str:
+    """The ``error`` / ``error.message`` field of a JSON error body (Ollama, OpenAI…), else ""."""
+    try:
+        data = resp.json()
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    err = data.get("error") if isinstance(data, dict) else None
+    if isinstance(err, dict):
+        err = err.get("message")
+    return str(err) if err else ""
+
+
 def raise_for_status(resp: HTTPResponse, *, label: str, hint: str = "") -> None:
     if 200 <= resp.status < 300:
         return
     detail = resp.text()
-    msg = f"{label}: HTTP {resp.status}: {detail}"
+    msg = f"{label}: HTTP {resp.status}: {error_text(resp) or detail}"
     if hint:
         msg = f"{msg} — {hint}"
     raise ProviderUnavailable(msg, status=resp.status, body=detail)

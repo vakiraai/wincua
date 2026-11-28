@@ -36,7 +36,7 @@ for _p in (
     sys.path.insert(0, str(_p))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _llm_common import add_provider_args, load_demo_config, print_run  # noqa: E402
+from _llm_common import add_provider_args, load_demo_config, preflight, print_run  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "form.html"
 TARGET = "wincua form demo"
@@ -188,10 +188,7 @@ async def main(argv: list[str] | None = None) -> int:
         if cfg is None:
             return 1
     if args.check:
-        from wincua.config import probe_chain
-
-        for name, ok, detail in await probe_chain(cfg, args.provider):
-            print(f"  [{'ok' if ok else 'unavailable'}] {name}: {detail}")
+        await preflight(cfg, args.provider)
         return 0
 
     if not FIXTURE.is_file():
@@ -263,6 +260,7 @@ async def main(argv: list[str] | None = None) -> int:
             f"then press Submit form. Mark done when the page shows {EXPECTED!r}."
         )
     else:
+        await preflight(cfg, args.provider)
         provider = args.provider
         task = model_task(fixture_uri, args.browser)
 
