@@ -76,6 +76,8 @@ async def run_with_model(args: argparse.Namespace, backend: str, cfg) -> int:
     print(f"  provider: {getattr(agent.provider, 'describe', lambda: agent.provider_name)()}")
     result = await agent.run()
     print_run(agent, result)
+    if result.recording_path:
+        print(f"  recording: {result.recording_path}")
     if not result.ok:
         return 2
     ok, display = await verify_visible("Calculator", equals=GOLDEN)

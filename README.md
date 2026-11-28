@@ -166,12 +166,33 @@ python examples/browser_form_demo.py --provider anthropic
 a fake Calculator on any OS. After the model calls `done`, the demo reads the
 display itself and checks 42.
 
+### Reliability gate (Phase 1: at least 4 of 5 runs)
+
+`examples/reliability.py` runs both demos N times, each in a fresh process, and
+scores them against the 80% gate. It prints a per-run table (PASS/FAIL, seconds,
+exit code, failure reason) and writes `report.md`, `report.json` and one log per
+run under `recordings\reliability-<time>\`. It exits 1 if a demo is below the gate.
+
+```powershell
+python examples/reliability.py                          # provider from wincua.toml, 5 runs each
+python examples/reliability.py --provider ollama        # qwen2.5vl:7b
+python examples/reliability.py --provider scripted      # no model: driver baseline
+python examples/reliability.py --runs 20 --interleave   # section 8 metric: 20 runs, demos alternated
+```
+
+Runs are unattended: a fallback to the human fails closed unless you pass
+`--allow-human`, and a pass may use at most one clarification. Before each run
+it closes demo windows left by the previous one (`--keep-windows` skips this).
+It kills a run after `--run-timeout` seconds (default 300). `-v` echoes each
+demo's output.
+
 ### Without a Windows desktop (CI / Linux / macOS)
 
 ```bash
 python examples/calculator_arith_demo.py --mock
 python examples/browser_form_demo.py --mock
 python examples/calculator_hitl_demo.py --mock --hitl cli
+python examples/reliability.py --mock --provider scripted
 ```
 
 `--mock` exercises the same scripted `Agent.run` loop against `MockBackend`
