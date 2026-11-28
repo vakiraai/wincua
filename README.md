@@ -136,9 +136,12 @@ unreachable, wincua tries `[provider].fallback`, ending in `null` (ask the human
 copy wincua.example.toml wincua.toml
 python -m wincua.config --probe            # which file, which chain, what is reachable
 
-# Ollama (default in the example): a text model with native tool calls
-ollama pull qwen2.5:7b
+# Ollama (default in the example): qwen2.5vl:7b, no native tools, so it runs in JSON-reply mode
+ollama pull qwen2.5vl:7b
 python examples/calculator_llm_demo.py --provider ollama
+python examples/browser_form_demo.py --provider ollama
+# ...or native tool calls (set model = "qwen2.5:7b" in [providers.ollama])
+ollama pull qwen2.5:7b
 # ...or vision + tools
 ollama pull qwen3-vl:8b
 python examples/calculator_llm_demo.py --provider ollama_vision

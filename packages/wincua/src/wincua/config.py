@@ -34,7 +34,12 @@ BUILTIN_PROVIDERS = ("ollama", "llamacpp", "anthropic", "openai", "openai_compat
 
 # Built-in defaults per provider (mirrors wincua.example.toml).
 PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
-    "ollama": {"base_url": "http://127.0.0.1:11434", "model": "qwen2.5:7b"},
+    "ollama": {
+        "base_url": "http://127.0.0.1:11434",
+        "model": "qwen2.5vl:7b",
+        "send_screenshot": False,
+        "num_ctx": 8192,
+    },
     "llamacpp": {"base_url": "http://127.0.0.1:8080", "model": "local"},
     "anthropic": {"model": "claude-sonnet-4-5", "api_key_env": "ANTHROPIC_API_KEY"},
     "openai": {"model": "gpt-4.1", "api_key_env": "OPENAI_API_KEY"},
@@ -270,7 +275,17 @@ def describe(cfg: WincuaConfig, provider: str | None = None) -> str:
         key = ""
         if pc.api_key_env:
             key = f", key env {pc.api_key_env} ({'set' if pc.api_key else 'NOT set'})"
-        lines.append(f"  {name}: type={pc.type} model={pc.model!r} base_url={pc.base_url or '(default)'}{key}")
+        extra = ""
+        if pc.type == "ollama":
+            from wincua_providers.ollama import lacks_native_tools
+
+            mode = str(pc.options.get("tool_mode", "auto"))
+            if mode == "json" or (mode == "auto" and lacks_native_tools(pc.model or "")):
+                extra = ", replies=JSON (no native tools)"
+            extra += f", screenshots={'on' if pc.options.get('send_screenshot', True) else 'off'}"
+        lines.append(
+            f"  {name}: type={pc.type} model={pc.model!r} base_url={pc.base_url or '(default)'}{key}{extra}"
+        )
     return "\n".join(lines)
 
 

@@ -74,7 +74,10 @@ def test_example_file_parses_and_builds_chain():
     chain = cfg.build_provider()
     assert isinstance(chain, FallbackProvider) and chain.chain == ["ollama", "null"]
     ollama = chain.providers[0]
-    assert isinstance(ollama, OllamaProvider) and ollama.model == "qwen2.5:7b"
+    assert isinstance(ollama, OllamaProvider) and ollama.model == "qwen2.5vl:7b"
+    assert ollama.tool_mode == "json" and ollama.send_screenshot is False and ollama.num_ctx == 8192
+    vision = cfg.build_provider("ollama_vision").providers[0]
+    assert vision.model == "qwen3-vl:8b" and vision.tool_mode == "auto" and vision.send_screenshot is True
     assert cfg.provider_config("anthropic").api_key_env == "ANTHROPIC_API_KEY"
 
 

@@ -16,25 +16,29 @@
 default = "ollama"          # ollama | llamacpp | anthropic | openai | openai_compat | null | scripted
 fallback = ["null"]         # tried in order if default is unreachable; "null" = ask the human (always last)
 
-# Ollama: pick a model with native tool calls ("tools" on ollama.com/library).
-# The Elements list (UI Automation text) is enough for Calculator / forms, so a
-# text model is the default; the vision profile below adds screenshots.
+# Ollama. qwen2.5vl:7b has no native tool calls, so wincua runs it in JSON-reply
+# mode: each reply is {"actions": [{"tool": ..., "args": {...}}]}, constrained
+# with a JSON schema. The Elements list (UI Automation text) carries every id
+# the model needs, so screenshots stay off (faster, smaller prompt).
 [providers.ollama]
 base_url = "http://127.0.0.1:11434"
-model = "qwen2.5:7b"        # ollama pull qwen2.5:7b   (tools, 4.7 GB, no thinking delay)
-send_screenshot = false     # text model: UIA element list only
-# Alternatives with native tools: "qwen3:8b" (set think = false for speed), "llama3.1:8b".
-# think = false             # Ollama "think" flag for thinking models (qwen3, qwen3-vl)
-# tool_mode = "auto"        # auto | native | json  (auto falls back to JSON replies if the model has no tool support)
-# num_ctx = 16384
+model = "qwen2.5vl:7b"      # ollama pull qwen2.5vl:7b  (vision, JSON-reply mode, 6.0 GB)
+send_screenshot = false     # UIA element list only; set true to also send the window image
+num_ctx = 8192              # Ollama's default context can cut off the tool instructions
+# tool_mode = "auto"        # auto | native | json  (auto: JSON replies for models without tool support)
+# json_schema = true        # constrain JSON replies with a schema; false = plain format "json"
 # timeout_s = 120
+# Native tool calls instead (more reliable for multi-step plans, text only):
+# model = "qwen2.5:7b"      # ollama pull qwen2.5:7b   (tools, 4.7 GB)
+# Other models with native tools: "qwen3:8b" (set think = false for speed), "llama3.1:8b".
+# think = false             # Ollama "think" flag for thinking models (qwen3, qwen3-vl)
 
 # Vision + tools: python examples/calculator_llm_demo.py --provider ollama_vision
 [providers.ollama_vision]
 type = "ollama"
 model = "qwen3-vl:8b"       # ollama pull qwen3-vl:8b   (vision + tools, 6.2 GB)
+send_screenshot = true
 # think = false
-# model = "qwen2.5vl:7b"    # vision only, no tool support: runs in JSON-reply mode, weaker at multi-step plans
 
 [providers.llamacpp]
 base_url = "http://127.0.0.1:8080"   # llama-server, OpenAI-compatible /v1 (start with --jinja and --mmproj)

@@ -79,17 +79,28 @@ Built-in defaults match the example file, so `[providers.ollama]` can be omitted
 
 - **Ollama** uses the native `POST /api/chat` with `images` and `tools`.
   Models without tool support (ollama.com lists `qwen2.5vl` as vision-only)
-  are switched to JSON replies (`format: "json"`) on the first "does not
-  support tools" error. In JSON mode a reply is one call
-  `{"tool": ..., "args": {...}}` or several `{"actions": [...]}`.
+  run in JSON-reply mode. Known vision-only models (`qwen2.5vl`, `llava`,
+  `llama3.2-vision`, `minicpm-v`, `moondream`, `gemma3`) start in it. Any other
+  model switches on its first "does not support tools" error. Replies are
+  constrained to `{"actions": [{"tool": ..., "args": {...}}]}` with a JSON
+  schema (Ollama structured outputs). Older servers that reject the schema
+  get plain `format: "json"` instead, and `json_schema = false` forces that.
+  Replies are capped at 512 tokens unless `max_tokens` is set. The parser
+  also accepts:
+  - fenced or prose-wrapped JSON;
+  - several objects in one reply;
+  - alias tool and argument names (`type_text`, `value`, `element`, ...);
+  - calls nested inside `args`;
+  - single quotes and trailing commas;
+  - replies cut off mid-way (the complete calls before the cut are kept).
 
-  **Which model.** Small models are much more reliable with native tool calls.
-  The default is `qwen2.5:7b` (text, tools) with `send_screenshot = false`:
-  the Elements list already carries every id the model needs.
-  `qwen3:8b` (set `think = false`) and `llama3.1:8b` also have native tools.
-  For screenshots plus tools use `qwen3-vl:8b` (the `ollama_vision` profile in
-  the example). `qwen2.5vl:7b` still works, in JSON mode, but in live runs it
-  tried to batch by nesting calls and repeated its first action.
+  **Which model.** The default is `qwen2.5vl:7b` in JSON-reply mode with
+  `send_screenshot = false` and `num_ctx = 8192`. The Elements list already
+  carries every id the model needs, and a screenshot only adds latency and
+  context. Ollama's default context can cut off the tool instructions.
+  `qwen2.5:7b` is the native tool-calling alternative (text only), as are
+  `qwen3:8b` (set `think = false`) and `llama3.1:8b`. For screenshots plus
+  tools use `qwen3-vl:8b` (the `ollama_vision` profile in the example).
 - **llama.cpp** (`llama-server`) uses the OpenAI-compatible `/v1/chat/completions`.
   Start it with `--jinja` for native tool calls and with a vision model plus its
   `--mmproj` for screenshots. Without them, wincua falls back to JSON replies and

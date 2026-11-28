@@ -227,6 +227,16 @@ def orphan_notes(turns: Sequence[Turn]) -> list[str]:
 NUDGE = "Reply with a tool call (or done / abort / ask_human)."
 
 
+def json_turn_messages(turn: Turn) -> list[dict[str, Any]]:
+    """A past turn in JSON-reply mode: the reply as the model should write it, then its results."""
+    actions = [{"tool": c.name, "args": clean_args(c.args)} for c in turn.calls]
+    results = "\n".join(f"{i}. {c.name}: {c.result}" for i, c in enumerate(turn.calls, 1))
+    return [
+        {"role": "assistant", "content": json.dumps({"actions": actions}, ensure_ascii=False)},
+        {"role": "user", "content": f"Results:\n{results}"},
+    ]
+
+
 def clean_args(args: dict[str, Any]) -> dict[str, Any]:
     """Drop provider-private keys (``_cu`` etc.) before echoing args to a model."""
     return {k: v for k, v in args.items() if not k.startswith("_")}
